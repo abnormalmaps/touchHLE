@@ -42,6 +42,7 @@ pub mod stdlib;
 pub mod string;
 pub mod sys;
 pub mod sysctl;
+pub mod task_info;
 pub mod time;
 pub mod unistd;
 pub mod wchar;

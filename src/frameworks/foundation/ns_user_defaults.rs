@@ -285,6 +285,13 @@ pub const CLASSES: ClassExports = objc_classes! {
     msg![env; dict writeToFile:plist_file_path atomically:true]
 }
 
+- (id)valueForKey:(id)key { // NSString*
+    let key_str = to_rust_string(env, key);
+    // todo: strip '@' and call super
+    assert!(!key_str.starts_with('@'));
+    msg![env; this objectForKey:key]
+}
+
 @end
 
 };

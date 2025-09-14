@@ -38,6 +38,7 @@ fn main() {
     build.define("DYNARMIC_WARNINGS_AS_ERRORS", "OFF");
     build.define("DYNARMIC_TESTS", "OFF");
     build.define("DYNARMIC_USE_BUNDLED_EXTERNALS", "ON");
+    // build.define("CMAKE_INTERPROCEDURAL_OPTIMIZATION", "TRUE");
     // This is Windows- and Android-specific because on macOS or Linux, you can
     // easily get Boost with a package manager.
     let os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS was not set");
@@ -125,6 +126,7 @@ fn main() {
         .file(package_root.join("lib.cpp"))
         .cpp(true)
         .std("c++17")
+        //.flag("-flto=thin")
         .include(dynarmic_out.join("include"))
         .compile("dynarmic_wrapper");
     rerun_if_changed(&package_root.join("lib.cpp"));

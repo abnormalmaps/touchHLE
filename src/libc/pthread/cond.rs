@@ -20,7 +20,8 @@ unsafe impl SafeRead for pthread_condattr_t {}
 
 #[repr(C, packed)]
 pub struct OpaqueCond {
-    _unused: i32,
+    /// Magic number (must be [MAGIC_COND])
+    magic: u32,
 }
 unsafe impl SafeRead for OpaqueCond {}
 
