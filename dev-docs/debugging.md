@@ -21,7 +21,9 @@ touchHLE will print the basic registers (r0-r13, SP, LR, PC) and a basic stack t
 
 ## Dumping classes/selectors/function symbols from binaries
 The `--dump=linking-info` flag dumps information about the classes, selectors, and lazy symbols (functions) that are requested by the binary, and how touchHLE is handling them. This is output to the file specified by `--dump-file=` (which defaults to the {running directory}/DUMP.txt.
+
 The most useful application for this is determining which classes/selectors/functions that (might) be needed by an application are not implemented by touchHLE. This can be checked with `dev-scripts/log_unimplemented.sh [name of app to check]` (make sure `jq` is installed!).
+
 The schemas for the JSON are described in `ObjC::dump_classes` (in `src/objc/classes.rs`), `ObjC::dump_selectors` (in `src/objc/selectors.rs`), and `Dyld::dump_lazy_symbols` (in `src/dyld.rs`).
 
 ### GDB Remote Serial Protocol server

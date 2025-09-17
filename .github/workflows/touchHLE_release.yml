@@ -57,6 +57,8 @@ jobs:
       - if: ${{ steps.cache-llvm.outputs.cache-hit != 'true' }}
         name: Extract LLVM
         run: tar -xf clang+llvm-12.0.0-x86_64-apple-darwin.tar.xz && mkdir tests/llvm && mv clang+llvm-12.0.0-x86_64-apple-darwin/* tests/llvm
+      - name: Get copy of common-3.0-sdk
+        run: cd ${{ github.workspace }}/tests && curl -L https://github.com/touchHLE/common-3.0-sdk/releases/latest/download/common-3.0.sdk-macOS-universal.tar.gz | tar xzv
       - name: Install x86_64 toolchain
         run: rustup target add x86_64-apple-darwin
       - name: Test
@@ -227,6 +229,9 @@ jobs:
     - if: ${{ steps.cache-llvm.outputs.cache-hit != 'true' }}
       name: Extract LLVM
       run: 7z -otests/llvm x LLVM-12.0.1-win64.exe
+    # Windows seems to break the stdout pipe for some reason
+    - name: Get copy of common-3.0-sdk
+      run: cd ${{ github.workspace }}/tests && curl -L --output ${{ runner.temp }}\sdk.tar.gz https://github.com/touchHLE/common-3.0-sdk/releases/latest/download/common-3.0.sdk-windows-x86_64.tar.gz && tar xzvf ${{ runner.temp }}\sdk.tar.gz
     - name: Test
       run: cargo test
       env:
