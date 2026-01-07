@@ -128,7 +128,7 @@ cargoNdk {
     // Make sure this matches the android abiFilters above.
     targets = arrayListOf("arm64")
     module = ".."
-    librariesNames = arrayListOf("libtouchHLE.so", "libSDL2.so", "libc++_shared.so")
+    librariesNames = arrayListOf("libtouchHLE.so", "libSDL3.so", "libc++_shared.so")
     extraCargoEnv = mapOf(
         "ANDROID_NDK" to android.ndkDirectory.toString(),
         "ANDROID_NDK_HOME" to android.ndkDirectory.toString(),
@@ -158,13 +158,13 @@ cargoNdk {
             )
         )
     }
-    // The default feature, "static", makes us use static linking for SDL2 and OpenAL Soft.
-    // For Android, we need dynamic linking for SDL2, but static linking for OpenAL Soft.
+    // The default feature, "static", makes us use static linking for SDL3 and OpenAL Soft.
+    // For Android, we need dynamic linking for SDL3, but static linking for OpenAL Soft.
     extraCargoBuildArguments = arrayListOf(
         "--lib",
         "--no-default-features",
         "--features",
-        "touchHLE_openal_soft_wrapper/static,sdl2/bundled"
+        "touchHLE_openal_soft_wrapper/static,sdl3/build-from-source"
     )
 }
 
