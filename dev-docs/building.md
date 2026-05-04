@@ -64,7 +64,7 @@ This has been tested on macOS 12.7.6 with Android Studio 2024.3.2 Patch 1 and ND
 
 With the prerequisites installed, `cargo run --release` (for a release build) or `cargo run` (for a debug build) should be enough to build and run touchHLE. On an underpowered, passively-cooled, 2-core laptop (2017 Retina MacBook), a clean release build takes a bit less than 9 minutes.
 
-touchHLE can also be dynamically linked (which means instead of using the bundled dependencies, it will use the dependencies provided by your system). To build a dynamically linked version of touchHLE, you will need to have the SDL2 and OpenAL shared libraries installed, and then you can append `--no-default-features` (this flag is passed in to disable static linking, which is the default) to the end of the cargo build command. For macOS users: Apple's OpenAL.framework is not supported, only OpenAL Soft, and you need to add it to the linker path yourself.
+touchHLE can also be dynamically linked (which means instead of using the bundled dependencies, it will use the dependencies provided by your system). To build a dynamically linked version of touchHLE, you will need to have the SDL3 and OpenAL shared libraries installed, and then you can append `--no-default-features` (this flag is passed in to disable static linking, which is the default) to the end of the cargo build command. For macOS users: Apple's OpenAL.framework is not supported, only OpenAL Soft, and you need to add it to the linker path yourself.
 
 ### Android
 
