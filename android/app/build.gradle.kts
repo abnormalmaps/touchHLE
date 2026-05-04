@@ -38,8 +38,11 @@ fun join(prefix: String, separator: String, branding: String): String {
 }
 
 android {
-    ndkVersion = "25.2.9519653"
-    compileSdk = 31
+    ndkVersion = "28.2.13676358"
+    compileSdk = 36
+    buildFeatures {
+        buildConfig = true
+    }
     defaultConfig {
         val branding = getTouchHLEBranding()
         applicationId = "org.touchhle.android"
