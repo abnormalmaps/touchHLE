@@ -43,7 +43,7 @@ fn get_macos_bundled_resources_path() -> Option<PathBuf> {
     if std::env::consts::OS != "macos" {
         return None;
     }
-    let base_path = PathBuf::from(sdl2::filesystem::base_path().ok()?);
+    let base_path = PathBuf::from(sdl3::filesystem::get_base_path().ok()?);
     if base_path.file_name().is_some_and(|p| p == "Resources") {
         Some(base_path)
     } else {
@@ -55,7 +55,7 @@ fn get_macos_bundled_resources_path() -> Option<PathBuf> {
 /// with touchHLE.
 pub struct ResourceFile {
     #[cfg(target_os = "android")]
-    file: sdl2::rwops::RWops<'static>,
+    file: sdl3::iostream::IOStream<'static>,
     #[cfg(not(target_os = "android"))]
     file: std::fs::File,
 }
@@ -63,9 +63,9 @@ impl ResourceFile {
     pub fn open(path: &str) -> Result<Self, String> {
         Ok(Self {
             // On Android, these resources are included as "assets" within the
-            // APK. We access them via SDL2's wrapper of Android's assets API.
+            // APK. We access them via SDL3's wrapper of Android's assets API.
             #[cfg(target_os = "android")]
-            file: sdl2::rwops::RWops::from_file(path, "r")?,
+            file: sdl3::iostream::IOStream::from_file(path, "r").map_err(|e| format!("{e}"))?,
 
             // On other OSes, resources are accessed as ordinary files.
             #[cfg(not(target_os = "android"))]
@@ -115,19 +115,16 @@ pub const SANDBOX_DIR: &str = "touchHLE_sandbox";
 pub fn user_data_base_path() -> Cow<'static, Path> {
     #[cfg(target_os = "android")]
     unsafe {
-        // This is an exception to the rule that SDL2 should only be used
+        // This is an exception to the rule that SDL3 should only be used
         // directly from src/window.rs. This is just too distant from windowing
         // to belong there.
 
         // Android storage has evolved in a quite messy fashion. Both "internal
         // storage" and "external storage" (aka the "SD card") are likely to be
-        // internal on a modern device, as absurd as that might sound. SDL2 has
+        // internal on a modern device, as absurd as that might sound. SDL3 has
         // APIs to get paths for both. We use the "external storage" because
         // it's more likely to be user-accessible.
-        extern "C" {
-            fn SDL_AndroidGetExternalStoragePath() -> *const std::ffi::c_char;
-        }
-        let path = SDL_AndroidGetExternalStoragePath();
+        let path = sdl3_sys::system::SDL_GetAndroidExternalStoragePath();
         if path.is_null() {
             log!("Couldn't get Android external storage path!");
             panic!();
@@ -140,9 +137,7 @@ pub fn user_data_base_path() -> Cow<'static, Path> {
         // be able to control the current directory, so user data needs to go in
         // a standard location.
         if get_macos_bundled_resources_path().is_some() {
-            return Cow::from(PathBuf::from(
-                sdl2::filesystem::pref_path("touchhle.org", "touchHLE").unwrap(),
-            ));
+            return Cow::from(sdl3::filesystem::get_pref_path("touchhle.org", "touchHLE").unwrap());
         }
         Cow::from(Path::new("."))
     }

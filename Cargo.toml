@@ -28,12 +28,12 @@ path = "src/bin.rs"
 
 [features]
 default = ["static"]
-static = ["sdl2/bundled", "sdl2/static-link", "touchHLE_openal_soft_wrapper/static"]
+static = ["sdl3/build-from-source", "sdl3/static-link", "touchHLE_openal_soft_wrapper/static"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [workspace.dependencies]
-cc = "1.0.83"
+cc = "1.2.0"
 cmake = "0.1.49"
 gl_generator = "0.14.0"
 
@@ -59,14 +59,8 @@ digest = "0.10.7"
 md-5 = "0.10.6"
 sha1 = "0.10.6"
 encoding_rs = "0.8.35"
-# We currently use a fork of rust-sdl2 because we need a fix for Android builds
-# that's not upstream yet.
-# The HIDAPI feature is enabled because rust-sdl2 hides the SDL2 sensor features
-# behind this, but the actual HIDAPI is not used by touchHLE (see window.rs).
-# Note that the submodule in vendor/SDL2/ must use exactly the same revision of
-# SDL2 that rust-sdl2 uses, so that the Android JNI interface matches.
-sdl2 = { git = "https://github.com/touchHLE/rust-sdl2", tag = "touchHLE-3", features = ["hidapi"] }
-sdl2-sys = { git = "https://github.com/touchHLE/rust-sdl2", tag = "touchHLE-3" }
+sdl3 = { version = "0.18.2", features = ["hidapi"] }
+sdl3-sys = "0.6.0"
 touchHLE_dynarmic_wrapper = { path = "src/cpu/dynarmic_wrapper" }
 touchHLE_gl_bindings = { path = "src/gles/gl_bindings" }
 touchHLE_openal_soft_wrapper = { path = "src/audio/openal_soft_wrapper" }
