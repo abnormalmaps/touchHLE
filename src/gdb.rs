@@ -134,7 +134,7 @@ impl GdbServer {
         }
     }
 
-    fn read_packet(&mut self) -> Option<String> {
+    fn read_packet(&mut self) -> Option<Vec<u8>> {
         let buffer = match self.reader.fill_buf() {
             Ok(buffer) => buffer,
             Err(e) => match e.kind() {
@@ -189,10 +189,15 @@ impl GdbServer {
         let checksum2 = body.iter().fold(0u8, |a, &b| a.wrapping_add(b));
         assert_eq!(checksum1, checksum2);
 
-        let body = String::from_utf8(body.to_vec()).unwrap();
+        // Some commands (like qSearch) _do_ communicate binary data, so we have
+        // to be able to support it.
+        let body = body.to_vec();
         self.reader.consume(body_end + 3);
 
-        log_dbg!("Got packet: {:?}", body);
+        match str::from_utf8(body.as_slice()) {
+            Ok(body) => log_dbg!("Got packet: {:?}", body),
+            Err(_) => log_dbg!("Got binary packet {:?}", body),
+        }
 
         // Send acknowledgment
         self.reader
@@ -218,6 +223,28 @@ impl GdbServer {
         if self.reader_is_nonblocking {
             self.reader.get_mut().set_nonblocking(false).unwrap();
             self.reader_is_nonblocking = false;
+        }
+        // This doesn't exist in stable?
+        fn slice_split_once(slice: &[u8], split: u8) -> Option<(&[u8], &[u8])> {
+            let index = slice.iter().position(|c| *c == split)?;
+            Some((&slice[..index], &slice[index + 1..]))
+        }
+
+        fn unescape_binary_data(data: &[u8]) -> Vec<u8> {
+            // A little overreserved in some cases but it's probably ok
+            let mut out = Vec::new();
+            let mut is_escaped = false;
+            for b in data.iter() {
+                if is_escaped {
+                    out.push(b ^ 0x20);
+                    is_escaped = false;
+                } else if *b == 0x7d {
+                    is_escaped = true;
+                } else {
+                    out.push(*b);
+                }
+            }
+            out
         }
 
         fn regs_for_command<'b>(
@@ -300,7 +327,7 @@ impl GdbServer {
                 continue;
             };
 
-            match p.as_bytes()[0] {
+            match p[0] {
                 // Query for target halt reason when first connecting
                 b'?' => {
                     assert!(stop_reason.is_none());
@@ -320,6 +347,7 @@ impl GdbServer {
                 }
                 // Write general registers
                 b'G' => {
+                    let p = str::from_utf8(&p).unwrap();
                     let data = &p[1..];
                     let regs = regs_for_command(self, env);
                     assert!(data.len() == regs.len() * 4 * 2);
@@ -335,6 +363,7 @@ impl GdbServer {
                 }
                 // Read single register by number
                 b'p' => {
+                    let p = str::from_utf8(&p).unwrap();
                     let num = usize::from_str_radix(&p[1..], 16).unwrap();
                     let tid = self.thread_for_other;
                     let tid: usize = if tid == 0 {
@@ -378,6 +407,7 @@ impl GdbServer {
                 }
                 // Write single register by number
                 b'P' => {
+                    let p = str::from_utf8(&p).unwrap();
                     let tid = self.thread_for_other;
                     let tid: usize = if tid == 0 {
                         env.current_thread
@@ -422,6 +452,7 @@ impl GdbServer {
                 }
                 // Read memory
                 b'm' => {
+                    let p = str::from_utf8(&p).unwrap();
                     let (addr, length) = p[1..].split_once(',').unwrap();
                     let addr = GuestUSize::from_str_radix(addr, 16).unwrap();
                     let length = GuestUSize::from_str_radix(length, 16).unwrap();
@@ -441,6 +472,7 @@ impl GdbServer {
                 }
                 // Write memory
                 b'M' => {
+                    let p = str::from_utf8(&p).unwrap();
                     let (header, data) = p[1..].split_once(':').unwrap();
                     let (addr, length) = header.split_once(',').unwrap();
                     let addr = GuestUSize::from_str_radix(addr, 16).unwrap();
@@ -468,6 +500,7 @@ impl GdbServer {
                 // Presumably "with" means "ignoring"?
                 b'c' | b'C' => {
                     // Signal is just ignored for now (TODO?)
+                    let p = str::from_utf8(&p).unwrap();
                     if p.as_bytes()[0] == b'c' {
                         let addr = &p[1..];
                         if !addr.is_empty() {
@@ -494,6 +527,7 @@ impl GdbServer {
                 // Step or "Step with signal".
                 b's' | b'S' => {
                     // Signal is just ignored for now (TODO?)
+                    let p = str::from_utf8(&p).unwrap();
                     if p.as_bytes()[0] == b's' {
                         let addr = &p[1..];
                         if !addr.is_empty() {
@@ -521,10 +555,11 @@ impl GdbServer {
                 }
                 // New style run/continue command.
                 b'v' => {
-                    if p == "vCont?" {
+                    if p == b"vCont?" {
                         self.send_packet("vCont;c;s;C;S")
-                    } else if p.starts_with("vCont") {
-                        let Some((_, commands)) = p.split_once(';') else {
+                    } else if p.starts_with(b"vCont") {
+                        let Some((_, commands)) = str::from_utf8(&p).unwrap().split_once(';')
+                        else {
                             // Bad vcont packet
                             self.send_packet("E00");
                             continue;
@@ -581,6 +616,7 @@ impl GdbServer {
                 }
                 // Checks if thread is still alive
                 b'T' => {
+                    let p = str::from_utf8(&p).unwrap();
                     let tid: usize = p.split_at(1).1.parse().unwrap();
                     if env.threads[tid - 1].is_alive() {
                         self.send_packet("OK");
@@ -590,6 +626,7 @@ impl GdbServer {
                 }
                 // Specifies thread commands should run on.
                 b'H' => {
+                    let p = str::from_utf8(&p).unwrap();
                     let command = p.as_bytes()[1];
                     let tid: isize = p.split_at(2).1.parse().unwrap();
                     if command == b'c' {
@@ -607,10 +644,10 @@ impl GdbServer {
                     panic!("Debugger requested kill.");
                 }
                 b'q' => {
-                    if p == "qC" {
+                    if p == b"qC" {
                         let tid = env.current_thread + 1;
                         self.send_packet(format!("QC{tid:x}").as_str());
-                    } else if p == "qfThreadInfo" {
+                    } else if p == b"qfThreadInfo" {
                         // First command to get threads, just send whole
                         // list over now.
                         let mut live_threads = Vec::new();
@@ -626,10 +663,11 @@ impl GdbServer {
                         }
                         write!(packet, "{:x}", live_threads[live_threads.len() - 1]).unwrap();
                         self.send_packet(packet.as_str());
-                    } else if p == "qsThreadInfo" {
+                    } else if p == b"qsThreadInfo" {
                         // Second command to get threads, end the list.
                         self.send_packet("l");
-                    } else if p.starts_with("qThreadExtraInfo") {
+                    } else if p.starts_with(b"qThreadExtraInfo") {
+                        let p = str::from_utf8(&p).unwrap();
                         let (_, tid_str) = p.split_once(',').unwrap();
                         let tid: usize = tid_str.parse().unwrap();
                         let tid = tid.saturating_sub(1);
@@ -639,16 +677,17 @@ impl GdbServer {
                             .bytes()
                             .for_each(|b| write!(thread_block_hex, "{b:02x}").unwrap());
                         self.send_packet(thread_block_hex.as_str());
-                    } else if p == "qAttached" {
+                    } else if p == b"qAttached" {
                         // Query whether we're attaching to an existing or new
                         // process (always sends new process)
                         self.send_packet("0");
                     // Query for supported features
-                    } else if p == "qSupported" || p.starts_with("qSupported:") {
+                    } else if p == b"qSupported" || p.starts_with(b"qSupported:") {
                         // Tell GDB we can send it an XML target description.
                         self.send_packet("qXfer:features:read+");
                     // Read XML target description
-                    } else if let Some(params) = p.strip_prefix("qXfer:features:read:") {
+                    } else if let Some(params) = p.strip_prefix(b"qXfer:features:read:") {
+                        let params = str::from_utf8(params).unwrap();
                         let (annex, params) = params.split_once(':').unwrap();
                         let (offset, length) = params.split_once(',').unwrap();
                         let offset = usize::from_str_radix(offset, 16).unwrap();
@@ -675,7 +714,8 @@ impl GdbServer {
                             // Unsupported annex or invalid offset
                             self.send_packet("E00");
                         }
-                    } else if let Some(cmd) = p.strip_prefix("qRcmd,") {
+                    } else if let Some(cmd) = p.strip_prefix(b"qRcmd,") {
+                        let cmd = str::from_utf8(cmd).unwrap();
                         // Convert the hex encoded command to a string:
                         let mut cmd_window = cmd;
                         let mut bytes = Vec::new();
@@ -721,6 +761,30 @@ impl GdbServer {
                             }
                         };
                         self.send_packet(&packet_str);
+                    } else if let Some(data) = p.strip_prefix(b"qSearch:memory:") {
+                        let (addr, data) = slice_split_once(data, b';').unwrap();
+                        let (length, data) = slice_split_once(data, b';').unwrap();
+                        let addr =
+                            GuestUSize::from_str_radix(str::from_utf8(addr).unwrap(), 16).unwrap();
+                        let length =
+                            GuestUSize::from_str_radix(str::from_utf8(length).unwrap(), 16)
+                                .unwrap();
+                        let data = unescape_binary_data(data);
+                        match env.mem.get_bytes_fallible(Ptr::from_bits(addr), length) {
+                            Some(range) => {
+                                match range.windows(data.len()).position(|d| d == data.as_slice()) {
+                                    Some(pos) => {
+                                        let pos: u32 = pos.try_into().unwrap();
+                                        self.send_packet(format!("1,{:x}", addr + pos).as_str());
+                                    }
+                                    None => self.send_packet("0"),
+                                }
+                            }
+                            None => {
+                                // Error 0
+                                self.send_packet("E00");
+                            }
+                        }
                     } else {
                         log_dbg!("Unhandled packet.");
                         self.send_packet("");
