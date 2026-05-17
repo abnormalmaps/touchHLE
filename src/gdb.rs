@@ -14,6 +14,7 @@
 
 use crate::cpu::{Cpu, CpuError};
 use crate::environment::{Environment, ThreadState};
+use crate::frameworks::foundation::ns_string::try_to_rust_string;
 use crate::mem::{GuestUSize, MutPtr, Ptr};
 use crate::objc::ObjC;
 use std::fmt::Write as _;
@@ -841,7 +842,9 @@ impl GdbServer {
 Monitor commands:
 bt/backtrace: Print a backtrace of all threads.
 classof <ptr/reg>: Print the class of the object at the pointer.
-htype/host_obj_type <ptr/reg>: Print the host type of the object at the pointer.";
+htype/host_obj_type <ptr/reg>: Print the host type of the object at the pointer.
+ps/print_str/print_string <ptr/reg>: Print the value of the NS/CFString at the pointer.
+";
             Ok(help_string.to_string())
         } else if ["bt", "backtrace"].contains(&cmd) {
             let mut output = String::new();
@@ -866,6 +869,14 @@ htype/host_obj_type <ptr/reg>: Print the host type of the object at the pointer.
                 .map_or(Err("Not a valid object.".to_string()), |ho| {
                     Ok(ho.type_name().to_string())
                 })
+        } else if ["print_str", "print_string", "ps"].contains(&cmd) {
+            let (ptr, _) = get_next_ptr_or_reg(&env.cpu, args)?;
+            try_to_rust_string(env, MutPtr::from_bits(ptr)).map(|str| {
+                let mut out = '"'.to_string();
+                out.push_str(&str);
+                out.push('"');
+                out
+            })
         } else {
             Err("Bad command. (Use `help` for a list of monitor commands)".to_string())
         }
