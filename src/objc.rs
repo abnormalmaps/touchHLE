@@ -84,6 +84,9 @@ pub struct ObjC {
     /// Mutexes for running the +initialize function.
     initializer_threads: HashMap<id, ThreadInitializer>,
 
+    /// Cache mapping metaclasses to classes.
+    metaclass_classes: HashMap<Class, Class>,
+
     /// Temporary storage for optional type information when sending a message.
     /// Type information isn't part of the `objc_msgSend` ABI, so an alternative
     /// channel is needed.
@@ -98,6 +101,7 @@ impl ObjC {
             classes: HashMap::new(),
             sync_mutexes: HashMap::new(),
             initializer_threads: HashMap::new(),
+            metaclass_classes: HashMap::new(),
             message_type_info: None,
         }
     }

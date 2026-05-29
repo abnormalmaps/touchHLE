@@ -1002,6 +1002,22 @@ impl ObjC {
         let host_object = self.get_host_object(class).unwrap();
         matches!(host_object.as_any().downcast_ref(), Some(FakeClass { .. }))
     }
+
+    #[allow(unused)]
+    pub fn get_non_metaclass(&mut self, mem: &mut Mem, class: Class) -> Class {
+        let ClassHostObject {
+            name, is_metaclass, ..
+        } = self.borrow(class);
+        if !is_metaclass {
+            return class;
+        }
+        if let Some(nonmeta) = self.metaclass_classes.get(&class) {
+            return *nonmeta;
+        }
+        let nonmeta = self.get_known_class(&name.clone(), mem);
+        self.metaclass_classes.insert(class, nonmeta);
+        nonmeta
+    }
 }
 
 pub(super) fn objc_getClass(env: &mut Environment, name: ConstPtr<u8>) -> id {
