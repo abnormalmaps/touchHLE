@@ -34,7 +34,7 @@ pub(super) struct ThreadInitializer {
     waiters: u32,
 }
 
-fn maybe_initialize_class(env: &mut Environment, receiver: id) {
+pub fn maybe_initialize_class(env: &mut Environment, receiver: id) {
     let class_host_object = env.objc.get_host_object(receiver).unwrap();
     let Some(&super::ClassHostObject {
         superclass,
@@ -156,6 +156,114 @@ fn maybe_initialize_class(env: &mut Environment, receiver: id) {
     }
 }
 
+/// Lookup the implementation of a method for a given class.
+/// This does not (and cannot) perform type checking!
+/// The is_super arg skips the first class if set.
+/// The receiver arg is pure for logging and can be set to nil if the lookup did
+/// not originate from a message.
+pub fn lookup_imp_for_class(
+    env: &mut Environment,
+    orig_class: Class,
+    selector: SEL,
+    receiver: id,
+    is_super: bool,
+) -> Option<IMP> {
+    let mut class = orig_class;
+    loop {
+        if class == nil {
+            assert!(class != orig_class);
+
+            let class_host_object = env.objc.get_host_object(orig_class).unwrap();
+            let &super::ClassHostObject {
+                ref name,
+                is_metaclass,
+                ..
+            } = class_host_object.as_any().downcast_ref().unwrap();
+
+            if receiver != nil {
+                panic!(
+                    "{} {:?} ({}class \"{}\", {:?}){} does not respond to selector \"{}\"!",
+                    if is_metaclass { "Class" } else { "Object" },
+                    receiver,
+                    if is_metaclass { "meta" } else { "" },
+                    name,
+                    orig_class,
+                    if is_super { "'s superclass" } else { "" },
+                    selector.as_str(&env.mem),
+                );
+            } else {
+                panic!(
+                    "Instances of {}class \"{}\" ({:?}){} does not respond to selector \"{}\"!",
+                    if is_metaclass { "meta" } else { "" },
+                    name,
+                    orig_class,
+                    if is_super { "'s superclass" } else { "" },
+                    selector.as_str(&env.mem),
+                );
+            }
+        }
+
+        let host_object = env.objc.get_host_object(class).unwrap();
+
+        if let Some(&super::ClassHostObject {
+            superclass,
+            ref methods,
+            ref name,
+            ..
+        }) = host_object.as_any().downcast_ref()
+        {
+            // Skip method lookup on first iteration if this is the super-call
+            // variant of objc_msgSend (look up the superclass first)
+            if is_super && class == orig_class {
+                class = superclass;
+                continue;
+            }
+
+            if let Some(imp) = methods.get(&selector) {
+                log_dbg!("Found method on: {}", name);
+                return Some(imp.clone());
+            } else {
+                class = superclass;
+            }
+        } else if let Some(&super::UnimplementedClass {
+            ref name,
+            is_metaclass,
+        }) = host_object.as_any().downcast_ref()
+        {
+            panic!(
+                "Class \"{}\" ({:?}) is unimplemented. Lookup to {} method \"{}\".",
+                name,
+                class,
+                if is_metaclass { "class" } else { "instance" },
+                selector.as_str(&env.mem),
+            );
+        } else if let Some(&super::FakeClass {
+            ref name,
+            is_metaclass,
+        }) = host_object.as_any().downcast_ref()
+        {
+            log!(
+                "Lookup for faked class \"{}\" ({:?}) {} method \"{}\". Behaving as if message was sent to nil.",
+                name,
+                class,
+                if is_metaclass { "class" } else { "instance" },
+                selector.as_str(&env.mem),
+            );
+            return None;
+        } else {
+            if receiver != nil {
+                panic!(
+                    "Item {class:?} in superclass chain of object {receiver:?}'s class {orig_class:?} has an unexpected host object type."
+                );
+            } else {
+                panic!(
+                    "Item {class:?} in superclass chain of class {orig_class:?} has an unexpected host object type."
+                );
+            }
+        }
+    }
+}
+
 /// The core implementation of `objc_msgSend`, the main function of Objective-C.
 ///
 /// Note that while only two parameters (usually receiver and selector) are
@@ -198,123 +306,46 @@ fn objc_msgSend_inner(
     }
 
     // Traverse the chain of superclasses to find the method implementation.
+    let Some(imp) = lookup_imp_for_class(env, orig_class, selector, receiver, super2.is_some()) else {
+        // This is a faked method, return nil.
+        env.cpu.regs_mut()[0..2].fill(0);
+        return;
+    };
 
-    let mut class = orig_class;
-    loop {
-        if class == nil {
-            assert!(class != orig_class);
-
-            let class_host_object = env.objc.get_host_object(orig_class).unwrap();
-            let &super::ClassHostObject {
-                ref name,
-                is_metaclass,
-                ..
-            } = class_host_object.as_any().downcast_ref().unwrap();
-
-            panic!(
-                "{} {:?} ({}class \"{}\", {:?}){} does not respond to selector \"{}\"!",
-                if is_metaclass { "Class" } else { "Object" },
-                receiver,
-                if is_metaclass { "meta" } else { "" },
-                name,
-                orig_class,
-                if super2.is_some() {
-                    "'s superclass"
-                } else {
-                    ""
-                },
-                selector.as_str(&env.mem),
-            );
-        }
-
-        let host_object = env.objc.get_host_object(class).unwrap();
-
-        if let Some(&super::ClassHostObject {
-            superclass,
-            ref methods,
-            ref name,
-            ..
-        }) = host_object.as_any().downcast_ref()
-        {
-            // Skip method lookup on first iteration if this is the super-call
-            // variant of objc_msgSend (look up the superclass first)
-            if super2.is_some() && class == orig_class {
-                class = superclass;
-                continue;
-            }
-
-            if let Some(imp) = methods.get(&selector) {
-                log_dbg!("Found method on: {}", name);
-                match imp {
-                    IMP::Host(host_imp) => {
-                        // TODO: do type checks when calling GuestIMPs too.
-                        // That requires using Objective-C type strings,
-                        // rather than Rust types, and should probably
-                        // warn rather than panicking,
-                        // because apps might rely on type punning.
-                        if let Some((sent_type_id, sent_type_desc)) = message_type_info {
-                            let (expected_type_id, expected_type_desc) = host_imp.type_info();
-                            if sent_type_id != expected_type_id {
-                                let msg = format!(
-                                    "\
+    match imp {
+        IMP::Host(host_imp) => {
+            // TODO: do type checks when calling GuestIMPs too.
+            // That requires using Objective-C type strings,
+            // rather than Rust types, and should probably
+            // warn rather than panicking,
+            // because apps might rely on type punning.
+            if let Some((sent_type_id, sent_type_desc)) = message_type_info {
+                let (expected_type_id, expected_type_desc) = host_imp.type_info();
+                if sent_type_id != expected_type_id {
+                    let msg = format!(
+                        "\
 Type mismatch when sending message {} to {:?}!
 - Message has type: {:?} / {}
 - Method expects type: {:?} / {}",
-                                    selector.as_str(&env.mem),
-                                    receiver,
-                                    sent_type_id,
-                                    sent_type_desc,
-                                    expected_type_id,
-                                    expected_type_desc
-                                );
-                                if tolerate_type_mismatch {
-                                    log!("Warning: {}", msg);
-                                } else {
-                                    panic!("{}", msg);
-                                }
-                            }
-                        }
-                        host_imp.call_from_guest(env)
+                        selector.as_str(&env.mem),
+                        receiver,
+                        sent_type_id,
+                        sent_type_desc,
+                        expected_type_id,
+                        expected_type_desc
+                    );
+                    if tolerate_type_mismatch {
+                        log!("Warning: {}", msg);
+                    } else {
+                        panic!("{}", msg);
                     }
-                    // We can't create a new stack frame, because that would
-                    // interfere with pass-through of stack arguments.
-                    IMP::Guest(guest_imp) => guest_imp.call_without_pushing_stack_frame(env),
                 }
-                return;
-            } else {
-                class = superclass;
             }
-        } else if let Some(&super::UnimplementedClass {
-            ref name,
-            is_metaclass,
-        }) = host_object.as_any().downcast_ref()
-        {
-            panic!(
-                "Class \"{}\" ({:?}) is unimplemented. Call to {} method \"{}\".",
-                name,
-                class,
-                if is_metaclass { "class" } else { "instance" },
-                selector.as_str(&env.mem),
-            );
-        } else if let Some(&super::FakeClass {
-            ref name,
-            is_metaclass,
-        }) = host_object.as_any().downcast_ref()
-        {
-            log!(
-                "Call to faked class \"{}\" ({:?}) {} method \"{}\". Behaving as if message was sent to nil.",
-                name,
-                class,
-                if is_metaclass { "class" } else { "instance" },
-                selector.as_str(&env.mem),
-            );
-            env.cpu.regs_mut()[0..2].fill(0);
-            return;
-        } else {
-            panic!(
-                "Item {class:?} in superclass chain of object {receiver:?}'s class {orig_class:?} has an unexpected host object type."
-            );
+            host_imp.call_from_guest(env)
         }
+        // We can't create a new stack frame, because that would
+        // interfere with pass-through of stack arguments.
+        IMP::Guest(guest_imp) => guest_imp.call_without_pushing_stack_frame(env),
     }
 }
 

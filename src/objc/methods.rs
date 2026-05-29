@@ -24,6 +24,7 @@ use std::any::TypeId;
 /// "guest methods" (functions in the guest app). Either way, the function needs
 /// to conform to the same ABI: [id] and [SEL] must be its first two parameters.
 #[allow(clippy::upper_case_acronyms)]
+#[derive(Clone)]
 pub enum IMP {
     Host(&'static dyn HostIMP),
     Guest(GuestIMP),
