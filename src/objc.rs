@@ -18,6 +18,7 @@
 //! classes that are both (considering Objective-C's support for inheritance,
 //! categories and dynamic class editing).
 
+use crate::abi::GuestFunction;
 use crate::dyld::{export_c_func, ConstantExports, FunctionExports, HostConstant, HostDylib};
 use crate::objc::messages::ThreadInitializer;
 use crate::MutexId;
@@ -87,6 +88,9 @@ pub struct ObjC {
     /// Cache mapping metaclasses to classes.
     metaclass_classes: HashMap<Class, Class>,
 
+    /// GuestFunctions for class+selector combos
+    cached_guest_functions: HashMap<(Class, SEL), GuestFunction>,
+
     /// Temporary storage for optional type information when sending a message.
     /// Type information isn't part of the `objc_msgSend` ABI, so an alternative
     /// channel is needed.
@@ -102,6 +106,7 @@ impl ObjC {
             sync_mutexes: HashMap::new(),
             initializer_threads: HashMap::new(),
             metaclass_classes: HashMap::new(),
+            cached_guest_functions: HashMap::new(),
             message_type_info: None,
         }
     }

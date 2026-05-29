@@ -159,8 +159,8 @@ pub fn maybe_initialize_class(env: &mut Environment, receiver: id) {
 /// Lookup the implementation of a method for a given class.
 /// This does not (and cannot) perform type checking!
 /// The is_super arg skips the first class if set.
-/// The receiver arg is pure for logging and can be set to nil if the lookup did
-/// not originate from a message.
+/// The receiver arg is purely for logging and can be set to nil if the lookup
+/// did not originate from a message.
 pub fn lookup_imp_for_class(
     env: &mut Environment,
     orig_class: Class,
@@ -306,7 +306,8 @@ fn objc_msgSend_inner(
     }
 
     // Traverse the chain of superclasses to find the method implementation.
-    let Some(imp) = lookup_imp_for_class(env, orig_class, selector, receiver, super2.is_some()) else {
+    let Some(imp) = lookup_imp_for_class(env, orig_class, selector, receiver, super2.is_some())
+    else {
         // This is a faked method, return nil.
         env.cpu.regs_mut()[0..2].fill(0);
         return;

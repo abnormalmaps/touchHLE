@@ -13,6 +13,7 @@ use super::{
 };
 use crate::abi::{CallFromGuest, DotDotDot, GuestArg, GuestFunction, GuestRet};
 use crate::mem::{guest_size_of, ConstPtr, GuestUSize, Mem, Ptr, SafeRead};
+use crate::objc::messages::{lookup_imp_for_class, maybe_initialize_class};
 use crate::Environment;
 use std::any::TypeId;
 
@@ -279,5 +280,53 @@ impl ObjC {
             }
         }
         selector_strings
+    }
+
+    pub fn class_get_method_guest_function(
+        env: &mut Environment,
+        class: Class,
+        sel: SEL,
+    ) -> GuestFunction {
+        if class == nil {
+            return GuestFunction::from_addr_with_thumb_bit(0);
+        }
+        if let Some(cached) = env.objc.cached_guest_functions.get(&(class, sel)) {
+            return *cached;
+        }
+        let &super::ClassHostObject { is_metaclass, .. } = env.objc.borrow(class);
+        if is_metaclass {
+            env.objc.get_non_metaclass(&mut env.mem, class);
+            // We need to initialize the class before the guest application is
+            // allowed to call any class methods, so we have to check now before
+            // it gets a handle to one.
+            maybe_initialize_class(env, class);
+        }
+        let Some(imp) = lookup_imp_for_class(env, class, sel, nil, false) else {
+            unimplemented!("Called class_get_method_guest_function on fake class, unimplemented!")
+        };
+        let guest_function = match imp {
+            IMP::Host(host_imp) => {
+                let mut func_name = String::new();
+                let super::ClassHostObject {
+                    name, is_metaclass, ..
+                } = env.objc.borrow(class);
+                if *is_metaclass {
+                    func_name.push_str("Trampoline for +[")
+                } else {
+                    func_name.push_str("Trampoline for -[")
+                }
+                func_name.push_str(name);
+                func_name.push(' ');
+                func_name.push_str(sel.as_str(&env.mem));
+                func_name.push(']');
+                env.dyld
+                    .create_guest_function(&mut env.mem, func_name.leak(), host_imp)
+            }
+            IMP::Guest(guest_function) => guest_function,
+        };
+        env.objc
+            .cached_guest_functions
+            .insert((class, sel), guest_function);
+        guest_function
     }
 }

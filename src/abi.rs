@@ -25,6 +25,16 @@ pub const FRAME_POINTER: usize = 7;
 #[derive(Copy, Clone, Debug)]
 pub struct GuestFunction(ConstVoidPtr);
 unsafe impl SafeRead for GuestFunction {}
+
+impl GuestRet for GuestFunction {
+    fn from_regs(regs: &[u32]) -> Self {
+        GuestFunction(ConstVoidPtr::from_bits(regs[0]))
+    }
+    fn to_regs(self, regs: &mut [u32]) {
+        regs[0] = self.0.to_bits();
+    }
+}
+
 impl GuestFunction {
     pub const THUMB_BIT: u32 = 0x1;
 
