@@ -39,7 +39,7 @@ pub const DEFAULT_OPTIONS_FILE: &str = "touchHLE_default_options.txt";
 /// Resources directory. If touchHLE is not located in a .app bundle, return
 /// [None].
 #[allow(dead_code)]
-fn get_macos_bundled_resources_path() -> Option<PathBuf> {
+pub fn get_macos_bundled_resources_path() -> Option<PathBuf> {
     if std::env::consts::OS != "macos" {
         return None;
     }

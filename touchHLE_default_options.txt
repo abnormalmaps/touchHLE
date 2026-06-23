@@ -36,6 +36,14 @@
 # - Use --stabilize-virtual-cursor= if the game's menus are practically unusable
 #   without it.
 
+org.touchhle.windows: --use-angle=true
+org.touchhle.macos: --use-angle=true
+
+# Android only supports GLES1, so we should always have it set. Setting the
+# option is mostly so that it acts as a hit to set the GLES version before
+# we create a window, which is required on Android.
+og.touchhle.android: --gles=gles1_native
+
 # Super Monkey Ball and Super Monkey Ball Lite
 # B = speed up level intro, Start = pause
 com.ooi.supermonkeyball: --landscape-left --y-tilt-offset=24 --button-to-touch=B,470,160 --button-to-touch=Start,240,10

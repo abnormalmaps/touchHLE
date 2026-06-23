@@ -8,6 +8,7 @@
 use crate::gles::GLESImplementation;
 use crate::window::{DeviceFamily, DeviceOrientation};
 use std::collections::HashMap;
+use std::env;
 use std::io::{BufRead, BufReader, Read};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::num::NonZeroU32;
@@ -49,6 +50,8 @@ pub struct Options {
     pub stick_to_touch: Option<(f32, f32, f32, f32)>,
     pub stabilize_virtual_cursor: Option<(f32, f32)>,
     pub gles1_implementation: Option<GLESImplementation>,
+    pub gles1_library_path: Option<String>,
+    pub egl_library_path: Option<String>,
     pub direct_memory_access: bool,
     pub gdb_listen_addrs: Option<Vec<SocketAddr>>,
     pub preferred_languages: Option<Vec<String>>,
@@ -82,6 +85,8 @@ impl Default for Options {
             stick_to_touch: None,
             stabilize_virtual_cursor: None,
             gles1_implementation: None,
+            gles1_library_path: None,
+            egl_library_path: None,
             direct_memory_access: true,
             gdb_listen_addrs: None,
             preferred_languages: None,
@@ -256,10 +261,87 @@ impl Options {
             self.zero_stack_after_guest_to_host_call = Some(value.parse().map_err(|_| {
                 "Invalid value for --zero-stack-after-guest-to-host-call=".to_string()
             })?);
+        } else if let Some(path) = arg.strip_prefix("--gles1-library-path=") {
+            if path.is_empty() {
+                self.gles1_library_path = None;
+            } else {
+                self.gles1_library_path = Some(path.to_string());
+            }
+        } else if let Some(path) = arg.strip_prefix("--egl-library-path=") {
+            if path.is_empty() {
+                self.egl_library_path = None;
+            } else {
+                self.egl_library_path = Some(path.to_string());
+            }
+        } else if let Some(value) = arg.strip_prefix("--use-angle=") {
+            match value {
+                "true" => {
+                    if env::consts::OS == "android" {
+                        self.gles1_library_path = Some("libGLESv1_CM_angle.so".to_string());
+                        self.egl_library_path = Some("libEGL_angle.so".to_string());
+                    } else if env::consts::OS == "macos" {
+                        self.gles1_library_path = Some(format!(
+                            "@rpath/libGLESv1_CM.{}",
+                            std::env::consts::DLL_EXTENSION
+                        ));
+                        self.egl_library_path =
+                            Some(format!("@rpath/libEGL.{}", std::env::consts::DLL_EXTENSION));
+                    } else {
+                        self.gles1_library_path =
+                            Some(format!("libGLESv1_CM.{}", std::env::consts::DLL_EXTENSION));
+                        self.egl_library_path =
+                            Some(format!("libEGL.{}", std::env::consts::DLL_EXTENSION));
+                    }
+                }
+                "false" => {
+                    self.gles1_library_path = None;
+                    self.egl_library_path = None;
+                }
+                _ => return Err("Invalid value for --use-angle=(true/false)".to_string()),
+            }
         } else {
             return Ok(false);
         };
         Ok(true)
+    }
+
+    /// Validates that the provided option combination is valid, and sets
+    /// defaults for certain combinations of options.
+    ///
+    /// If you are adding default options, you should prefer to add them using
+    /// the "org.touchhle.[all/(os)]" in touchHLE_default_options. Only use
+    /// this when you have default options that are dependent on other options.
+    pub fn validate_and_fixup_options(&mut self) -> Result<(), String> {
+        if self.gles1_library_path.is_some() ^ self.egl_library_path.is_some() {
+            return Err(
+                "--gles1-library-path= and --egl-library-path= must both be set or unset together!"
+                    .to_string(),
+            );
+        }
+
+        if self.egl_library_path.is_some() {
+            // ANGLE can only use GLES1, so we should set it so that it knows
+            // that when opening a window. On the offchance someone is using
+            // a different library and has manually specified gl2, we allow
+            // them to do so.
+            log!("Defaulting to native GLES since --egl-library-path is set, set --gles1=gles1_on_gl2 to ignore.");
+            self.gles1_implementation = Some(GLESImplementation::GLES1Native);
+        }
+
+        if env::consts::OS == "windows"
+            && self.gles1_library_path.is_none()
+            && self.gles1_implementation != Some(GLESImplementation::GLES1Native)
+        {
+            // Some windows implementations _say_ they support GLES, but
+            // don't really support it well enough to use. We're forcing gl2
+            // unless a gl library is set (which indicates that ANGLE is
+            // being used), or GLES is explicitly specified.
+            {
+                log!("Defaulting to GLES on GL2 to workaround buggy driver implementations, set --use-angle=true or --gles1=gles1_native to ignore.");
+                self.gles1_implementation = Some(GLESImplementation::GLES1OnGL2);
+            }
+        }
+        Ok(())
     }
 }
 

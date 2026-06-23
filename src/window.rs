@@ -13,7 +13,7 @@
 //! will be needed for the runtime of the app.
 
 use crate::gles::present::present_frame;
-use crate::gles::{create_gles1_ctx_no_parent_stack, GLESContext, GLES};
+use crate::gles::{create_gles1_ctx_no_parent_stack, GLESContext, GLESImplementation, GLES};
 use crate::image::Image;
 use crate::matrix::Matrix;
 use crate::options::Options;
@@ -21,6 +21,7 @@ use crate::Environment;
 use sdl3::mouse::MouseButton;
 use sdl3::pixels::PixelFormat;
 use sdl3::surface::Surface;
+use sdl3::video::WindowBuildError;
 use sdl3_sys::power::SDL_PowerState;
 use std::collections::{HashMap, VecDeque};
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -262,22 +263,61 @@ impl Window {
         launch_image: Option<Image>,
         options: &Options,
     ) -> Window {
+        if options.egl_library_path.is_some() {
+            // For windows and x11 linux, we need to set this before the video
+            // context is initialized, or SDL will try to use WGL/XGL alongside
+            // ANGLE's EGL, which won't work. (Actually, I'm pretty sure this is
+            // fixed on "main" in SDL but there's no rust crate for us to follow
+            // that upstream branch!)
+            sdl3::hint::set("SDL_VIDEO_FORCE_EGL", "1");
+        } else {
+            unsafe {
+                sdl3_sys::hints::SDL_ResetHint(c"SDL_VIDEO_FORCE_EGL".as_ptr());
+            }
+        }
         let sdl_ctx = sdl3::init().unwrap();
         let video_ctx = sdl_ctx.video().unwrap();
 
-        if env::consts::OS == "android" {
-            // It's important to set context version BEFORE window creation
-            // ref. https://wiki.libsdl.org/SDL3/SDL_GLAttr
-            let attr = video_ctx.gl_attr();
-            attr.set_context_version(1, 1);
-            attr.set_context_profile(sdl3::video::GLProfile::GLES);
-
-            // Disable blocking of event loop when app is paused.
-            sdl3::hint::set("SDL_ANDROID_BLOCK_ON_PAUSE", "0");
+        // If the gles implementation has been explicitly set, we take it as
+        // a hint to preset the gles implementation before we open any windows.
+        // This matters primarily on windows and android, which both require
+        // this (for their own reasons).
+        match options.gles1_implementation {
+            Some(GLESImplementation::GLES1Native) => {
+                let attr = video_ctx.gl_attr();
+                attr.set_context_version(1, 1);
+                attr.set_context_profile(sdl3::video::GLProfile::GLES);
+            }
+            Some(GLESImplementation::GLES1OnGL2) => {
+                let attr = video_ctx.gl_attr();
+                attr.set_context_version(2, 1);
+                attr.set_context_profile(sdl3::video::GLProfile::Compatibility);
+            }
+            None => {}
         }
 
         // Separate mouse and touch events
         sdl3::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
+
+        if let Some(path) = &options.egl_library_path {
+            sdl3::hint::set("SDL_EGL_LIBRARY", path);
+            // We want to always use the library version of EGL/GLES, which is
+            // forced by this hint.
+            sdl3::hint::set("SDL_OPENGL_ES_DRIVER", "0");
+
+            sdl3::hint::set(
+                "SDL_OPENGL_LIBRARY",
+                options.gles1_library_path.as_ref().unwrap(),
+            );
+        } else {
+            // Unset the hints in case they were previously set as an app picker
+            // option.
+            unsafe {
+                sdl3_sys::hints::SDL_ResetHint(c"SDL_EGL_LIBRARY".as_ptr());
+                sdl3_sys::hints::SDL_ResetHint(c"SDL_OPENGL_ES_DRIVER".as_ptr());
+                sdl3_sys::hints::SDL_ResetHint(c"SDL_OPENGL_LIBRARY".as_ptr());
+            }
+        }
 
         // SDL3 disables the screen saver by default, but iPhone OS enables
         // the idle timer that triggers sleep by default, so we turn it back on
@@ -325,13 +365,29 @@ impl Window {
         } else {
             let (width, height) =
                 size_for_orientation(device_family, device_orientation, scale_hack);
-            let window = video_ctx
+            match video_ctx
                 .window(title, width, height)
                 .position_centered()
                 .opengl()
                 .build()
-                .unwrap();
-            window
+            {
+                Ok(window) => window,
+                Err(err) => {
+                    if let WindowBuildError::SdlError(sdl_err) = err {
+                        if matches!(env::consts::OS, "windows" | "macos") {
+                            panic!("SDL error while building window: {}.
+                                \tIf you are a user this is either a bug or a result of an incomplete download.
+                                \tPlease reinstall with all files from the zip/dmg, and if issues persist, report this as a bug.
+
+                                \tIf you are a developer, please ensure that you have read the section 'Setup' in dev-docs/building.md.", sdl_err);
+                        } else {
+                            panic!("SDL error while building window: {}.", sdl_err);
+                        }
+                    } else {
+                        panic!("Error while building window: {}", err);
+                    }
+                }
+            }
         };
 
         if env::consts::OS == "android" {

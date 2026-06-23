@@ -27,3 +27,10 @@ android/build
 # Default developer dump file
 
 DUMP.txt
+
+# ANGLE libraries
+
+libGLESv1_CM.*
+libGLESv2.*
+libEGL.*
+d3dcompiler_47.dll
