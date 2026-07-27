@@ -24,11 +24,12 @@ if [[ $# == 3 ]]; then
     iconutil -c icns -o "$ICON_NAME.icns" "$ICON_NAME.iconset"
 
     rm -rf "$APP_NAME.app"
-    mkdir -p "$APP_NAME.app"/Contents/MacOS "$APP_NAME.app"/Contents/Resources
+    mkdir -p "$APP_NAME.app"/Contents/MacOS "$APP_NAME.app"/Contents/Resources "$APP_NAME.app"/Contents/Frameworks/
     cp $PATH_TO_BINARY "$APP_NAME.app"/Contents/MacOS/touchHLE
     cp -r ../touchHLE_dylibs "$APP_NAME.app"/Contents/Resources/
     cp -r ../touchHLE_fonts "$APP_NAME.app"/Contents/Resources/
     cp -r ../touchHLE_default_options.txt "$APP_NAME.app"/Contents/Resources/
+    cp ../libGLESv1_CM.dylib ../libGLESv2.dylib ../libEGL.dylib "$APP_NAME.app"/Contents/Frameworks/
     cp "$ICON_NAME.icns" "$APP_NAME.app"/Contents/Resources/
 
     plutil -create xml1 "$APP_NAME.app"/Contents/Info.plist

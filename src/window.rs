@@ -5,7 +5,7 @@
  */
 //! Abstraction of window setup, OpenGL context creation and event handling.
 //!
-//! Implemented using the sdl2 crate (a Rust wrapper for SDL2). All usage of
+//! Implemented using the sdl3 crate (a Rust wrapper for SDL3). All usage of
 //! SDL should be confined to this module.
 //!
 //! There is currently no separation of concerns between a single window and
@@ -13,21 +13,23 @@
 //! will be needed for the runtime of the app.
 
 use crate::gles::present::present_frame;
-use crate::gles::{create_gles1_ctx_no_parent_stack, GLESContext, GLES};
+use crate::gles::{create_gles1_ctx_no_parent_stack, GLESContext, GLESImplementation, GLES};
 use crate::image::Image;
 use crate::matrix::Matrix;
 use crate::options::Options;
 use crate::Environment;
-use sdl2::mouse::MouseButton;
-use sdl2::pixels::PixelFormatEnum;
-use sdl2::surface::Surface;
-use sdl2_sys::SDL_PowerState;
+use sdl3::mouse::MouseButton;
+use sdl3::pixels::PixelFormat;
+use sdl3::surface::Surface;
+use sdl3::video::WindowBuildError;
+use sdl3_sys::power::SDL_PowerState;
 use std::collections::{HashMap, VecDeque};
-use std::env;
 use std::f32::consts::{FRAC_PI_2, PI};
+use std::ffi::CStr;
 use std::num::NonZeroU32;
 use std::ptr::null_mut;
 use std::time::{Duration, Instant};
+use std::{env, slice};
 
 #[allow(non_camel_case_types)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -105,18 +107,17 @@ fn rotate_fullscreen_size(orientation: DeviceOrientation, screen_size: (u32, u32
         }
     }
 }
-/// Tell SDL2 what orientation we want. Only useful on Android.
-fn set_sdl2_orientation(orientation: DeviceOrientation) {
-    // Despite the name, this hint works on Android too.
-    sdl2::hint::set(
-        "SDL_IOS_ORIENTATIONS",
+/// Tell SDL3 what orientation we want. Only useful on Android.
+fn set_sdl3_orientation(orientation: DeviceOrientation) {
+    sdl3::hint::set(
+        "SDL_ORIENTATIONS",
         match orientation {
             DeviceOrientation::Portrait => "Portrait",
             // The inversion is deliberate. These probably correspond to
             // iPhone OS content orientations?
             DeviceOrientation::PortraitUpsideDown => "PortraitUpsideDown",
-            DeviceOrientation::LandscapeLeft => "LandscapeRight",
-            DeviceOrientation::LandscapeRight => "LandscapeLeft",
+            DeviceOrientation::LandscapeLeft => "LandscapeLeft",
+            DeviceOrientation::LandscapeRight => "LandscapeRight",
         },
     );
 }
@@ -124,7 +125,7 @@ fn set_sdl2_orientation(orientation: DeviceOrientation) {
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum FingerId {
     Mouse,
-    Touch(i64),
+    Touch(u64),
     VirtualCursor,
     ButtonToTouch(crate::options::Button),
     StickToTouch,
@@ -181,7 +182,7 @@ pub enum GLVersion {
     GL21Compat,
 }
 
-pub struct GLContext(sdl2::video::GLContext);
+pub struct GLContext(sdl3::video::GLContext);
 
 impl GLContext {
     pub fn is_current(&self) -> bool {
@@ -193,7 +194,7 @@ fn surface_from_image(image: &Image) -> Surface<'_> {
     let src_pixels = image.pixels();
     let (width, height) = image.dimensions();
 
-    let mut surface = Surface::new(width, height, PixelFormatEnum::RGBA32).unwrap();
+    let mut surface = Surface::new(width, height, PixelFormat::RGBA32).unwrap();
     let (width, height) = (width as usize, height as usize);
     let pitch = surface.pitch() as usize;
     surface.with_lock_mut(|dst_pixels| {
@@ -211,10 +212,10 @@ fn surface_from_image(image: &Image) -> Surface<'_> {
 }
 
 pub struct Window {
-    _sdl_ctx: sdl2::Sdl,
-    video_ctx: sdl2::VideoSubsystem,
-    window: sdl2::video::Window,
-    event_pump: sdl2::EventPump,
+    _sdl_ctx: sdl3::Sdl,
+    video_ctx: sdl3::VideoSubsystem,
+    window: sdl3::video::Window,
+    event_pump: sdl3::EventPump,
     event_queue: VecDeque<Event>,
     last_polled: Instant,
     /// Separate queue for extremely high-priority events (e.g. app about to
@@ -233,12 +234,12 @@ pub struct Window {
     splash_image: Option<Image>,
     device_family: DeviceFamily,
     device_orientation: DeviceOrientation,
-    controller_ctx: sdl2::GameControllerSubsystem,
-    controllers: Vec<sdl2::controller::GameController>,
+    controller_ctx: sdl3::GamepadSubsystem,
+    controllers: Vec<sdl3::gamepad::Gamepad>,
     dpad_state: DpadState,
     stick_active: bool,
-    _sensor_ctx: sdl2::SensorSubsystem,
-    accelerometer: Option<sdl2::sensor::Sensor>,
+    _sensor_ctx: sdl3::SensorSubsystem,
+    accelerometer: Option<sdl3::sensor::Sensor>,
     virtual_cursor_last: Option<(f32, f32, bool, bool)>,
     virtual_cursor_last_unsticky: Option<(f32, f32, Instant)>,
     virtual_accelerometer_last: Option<(f32, f32, bool)>,
@@ -251,7 +252,7 @@ pub struct Window {
 
 impl Window {
     /// Returns [true] if touchHLE is running on a device where we should always
-    /// display fullscreen, but SDL2 will let us control the orientation, i.e.
+    /// display fullscreen, but SDL3 will let us control the orientation, i.e.
     /// Android devices.
     pub fn rotatable_fullscreen() -> bool {
         env::consts::OS == "android"
@@ -262,31 +263,63 @@ impl Window {
         launch_image: Option<Image>,
         options: &Options,
     ) -> Window {
-        let sdl_ctx = sdl2::init().unwrap();
+        if options.egl_library_path.is_some() {
+            // For windows and x11 linux, we need to set this before the video
+            // context is initialized, or SDL will try to use WGL/XGL alongside
+            // ANGLE's EGL, which won't work. (Actually, I'm pretty sure this is
+            // fixed on "main" in SDL but there's no rust crate for us to follow
+            // that upstream branch!)
+            sdl3::hint::set("SDL_VIDEO_FORCE_EGL", "1");
+        } else {
+            unsafe {
+                sdl3_sys::hints::SDL_ResetHint(c"SDL_VIDEO_FORCE_EGL".as_ptr());
+            }
+        }
+        let sdl_ctx = sdl3::init().unwrap();
         let video_ctx = sdl_ctx.video().unwrap();
 
-        // The "hidapi" feature of rust-sdl2 is enabled so that sdl2::sensor
-        // is available, but we don't want to enable SDL's HIDAPI controller
-        // drivers because they cause duplicated controllers on macOS
-        // (https://github.com/libsdl-org/SDL/issues/7479). Once that's fixed,
-        // remove this (https://github.com/touchHLE/touchHLE/issues/85).
-        sdl2::hint::set("SDL_JOYSTICK_HIDAPI", "0");
-
-        if env::consts::OS == "android" {
-            // It's important to set context version BEFORE window creation
-            // ref. https://wiki.libsdl.org/SDL2/SDL_GLattr
-            let attr = video_ctx.gl_attr();
-            attr.set_context_version(1, 1);
-            attr.set_context_profile(sdl2::video::GLProfile::GLES);
-
-            // Disable blocking of event loop when app is paused.
-            sdl2::hint::set("SDL_ANDROID_BLOCK_ON_PAUSE", "0");
+        // If the gles implementation has been explicitly set, we take it as
+        // a hint to preset the gles implementation before we open any windows.
+        // This matters primarily on windows and android, which both require
+        // this (for their own reasons).
+        match options.gles1_implementation {
+            Some(GLESImplementation::GLES1Native) => {
+                let attr = video_ctx.gl_attr();
+                attr.set_context_version(1, 1);
+                attr.set_context_profile(sdl3::video::GLProfile::GLES);
+            }
+            Some(GLESImplementation::GLES1OnGL2) => {
+                let attr = video_ctx.gl_attr();
+                attr.set_context_version(2, 1);
+                attr.set_context_profile(sdl3::video::GLProfile::Compatibility);
+            }
+            None => {}
         }
 
         // Separate mouse and touch events
-        sdl2::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
+        sdl3::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
 
-        // SDL2 disables the screen saver by default, but iPhone OS enables
+        if let Some(path) = &options.egl_library_path {
+            sdl3::hint::set("SDL_EGL_LIBRARY", path);
+            // We want to always use the library version of EGL/GLES, which is
+            // forced by this hint.
+            sdl3::hint::set("SDL_OPENGL_ES_DRIVER", "0");
+
+            sdl3::hint::set(
+                "SDL_OPENGL_LIBRARY",
+                options.gles1_library_path.as_ref().unwrap(),
+            );
+        } else {
+            // Unset the hints in case they were previously set as an app picker
+            // option.
+            unsafe {
+                sdl3_sys::hints::SDL_ResetHint(c"SDL_EGL_LIBRARY".as_ptr());
+                sdl3_sys::hints::SDL_ResetHint(c"SDL_OPENGL_ES_DRIVER".as_ptr());
+                sdl3_sys::hints::SDL_ResetHint(c"SDL_OPENGL_LIBRARY".as_ptr());
+            }
+        }
+
+        // SDL3 disables the screen saver by default, but iPhone OS enables
         // the idle timer that triggers sleep by default, so we turn it back on
         // here, and then the app can disable it if it wants to.
         video_ctx.enable_screen_saver();
@@ -300,8 +333,13 @@ impl Window {
 
         let mut window = if Self::rotatable_fullscreen() {
             // Without this, SDL will force fullscreen mode to be portrait.
-            set_sdl2_orientation(device_orientation);
-            let screen_size = video_ctx.display_bounds(0).unwrap().size();
+            set_sdl3_orientation(device_orientation);
+            let screen_size = video_ctx
+                .get_primary_display()
+                .unwrap()
+                .get_bounds()
+                .unwrap()
+                .size();
             let (width, height) = rotate_fullscreen_size(device_orientation, screen_size);
             let window = video_ctx
                 .window(title, width, height)
@@ -311,10 +349,15 @@ impl Window {
                 .unwrap();
             window
         } else if fullscreen {
-            let (width, height) = video_ctx.display_bounds(0).unwrap().size();
+            let (width, height) = video_ctx
+                .get_primary_display()
+                .unwrap()
+                .get_bounds()
+                .unwrap()
+                .size();
             let window = video_ctx
                 .window(title, width, height)
-                .fullscreen_desktop()
+                .fullscreen()
                 .opengl()
                 .build()
                 .unwrap();
@@ -322,19 +365,35 @@ impl Window {
         } else {
             let (width, height) =
                 size_for_orientation(device_family, device_orientation, scale_hack);
-            let window = video_ctx
+            match video_ctx
                 .window(title, width, height)
                 .position_centered()
                 .opengl()
                 .build()
-                .unwrap();
-            window
+            {
+                Ok(window) => window,
+                Err(err) => {
+                    if let WindowBuildError::SdlError(sdl_err) = err {
+                        if matches!(env::consts::OS, "windows" | "macos") {
+                            panic!("SDL error while building window: {}.
+                                \tIf you are a user this is either a bug or a result of an incomplete download.
+                                \tPlease reinstall with all files from the zip/dmg, and if issues persist, report this as a bug.
+
+                                \tIf you are a developer, please ensure that you have read the section 'Setup' in dev-docs/building.md.", sdl_err);
+                        } else {
+                            panic!("SDL error while building window: {}.", sdl_err);
+                        }
+                    } else {
+                        panic!("Error while building window: {}", err);
+                    }
+                }
+            }
         };
 
         if env::consts::OS == "android" {
             // Sanity check
             let gl_attr = video_ctx.gl_attr();
-            debug_assert_eq!(gl_attr.context_profile(), sdl2::video::GLProfile::GLES);
+            debug_assert_eq!(gl_attr.context_profile(), sdl3::video::GLProfile::GLES);
             debug_assert_eq!(gl_attr.context_version(), (1, 1));
         }
 
@@ -344,14 +403,14 @@ impl Window {
 
         let event_pump = sdl_ctx.event_pump().unwrap();
 
-        let controller_ctx = sdl_ctx.game_controller().unwrap();
+        let controller_ctx = sdl_ctx.gamepad().unwrap();
 
         let sensor_ctx = sdl_ctx.sensor().unwrap();
-        let mut accelerometer: Option<sdl2::sensor::Sensor> = None;
+        let mut accelerometer: Option<sdl3::sensor::Sensor> = None;
         if let Ok(num_sensors) = sensor_ctx.num_sensors() {
-            for sensor_idx in 0..num_sensors {
-                if let Ok(sensor) = sensor_ctx.open(sensor_idx) {
-                    if sensor.sensor_type() == sdl2::sensor::SensorType::Accelerometer {
+            for sensor_id in num_sensors {
+                if let Ok(sensor) = sensor_ctx.open(sensor_id) {
+                    if sensor.sensor_type() == sdl3::sensor::SensorType::Accelerometer {
                         log!("Accelerometer detected: {}.", sensor.name());
                         accelerometer = Some(sensor);
                         break;
@@ -402,7 +461,7 @@ impl Window {
 
         // Set up OpenGL ES context used for splash screen and app UI rendering
         // (see src/frameworks/core_animation/composition.rs). OpenGL ES is used
-        // because SDL2 won't let us use more than one graphics API in the same
+        // because SDL3 won't let us use more than one graphics API in the same
         // window, and we also need OpenGL ES for the app's own rendering.
         let mut gl_ins = create_gles1_ctx_no_parent_stack(&mut window, options);
         {
@@ -462,31 +521,29 @@ impl Window {
             // Round to match touch precision of official devices.
             (out_x.round(), out_y.round())
         }
-        fn transform_virt_accel_coords(window: &Window, (in_x, in_y): (i32, i32)) -> (f32, f32) {
+        fn transform_virt_accel_coords(window: &Window, (in_x, in_y): (f32, f32)) -> (f32, f32) {
             let (_, _, vw, vh) = window.viewport();
-            let out_x = ((in_x as f32 / vw as f32) * 2.0 - 1.0).clamp(-1.0, 1.0);
-            let out_y = ((in_y as f32 / vh as f32) * 2.0 - 1.0).clamp(-1.0, 1.0);
+            let out_x = ((in_x / vw as f32) * 2.0 - 1.0).clamp(-1.0, 1.0);
+            let out_y = ((in_y / vh as f32) * 2.0 - 1.0).clamp(-1.0, 1.0);
             (out_x, out_y)
         }
-        fn translate_button(button: sdl2::controller::Button) -> Option<crate::options::Button> {
+        fn translate_button(button: sdl3::gamepad::Button) -> Option<crate::options::Button> {
             match button {
-                sdl2::controller::Button::DPadLeft => Some(crate::options::Button::DPadLeft),
-                sdl2::controller::Button::DPadUp => Some(crate::options::Button::DPadUp),
-                sdl2::controller::Button::DPadRight => Some(crate::options::Button::DPadRight),
-                sdl2::controller::Button::DPadDown => Some(crate::options::Button::DPadDown),
-                sdl2::controller::Button::Start => Some(crate::options::Button::Start),
-                sdl2::controller::Button::A => Some(crate::options::Button::A),
-                sdl2::controller::Button::B => Some(crate::options::Button::B),
-                sdl2::controller::Button::X => Some(crate::options::Button::X),
-                sdl2::controller::Button::Y => Some(crate::options::Button::Y),
-                sdl2::controller::Button::LeftShoulder => {
-                    Some(crate::options::Button::LeftShoulder)
-                }
+                sdl3::gamepad::Button::DPadLeft => Some(crate::options::Button::DPadLeft),
+                sdl3::gamepad::Button::DPadUp => Some(crate::options::Button::DPadUp),
+                sdl3::gamepad::Button::DPadRight => Some(crate::options::Button::DPadRight),
+                sdl3::gamepad::Button::DPadDown => Some(crate::options::Button::DPadDown),
+                sdl3::gamepad::Button::Start => Some(crate::options::Button::Start),
+                sdl3::gamepad::Button::South => Some(crate::options::Button::A),
+                sdl3::gamepad::Button::East => Some(crate::options::Button::B),
+                sdl3::gamepad::Button::West => Some(crate::options::Button::X),
+                sdl3::gamepad::Button::North => Some(crate::options::Button::Y),
+                sdl3::gamepad::Button::LeftShoulder => Some(crate::options::Button::LeftShoulder),
                 _ => None,
             }
         }
         fn finger_absolute_coords(window: &Window, (x, y): (f32, f32)) -> (f32, f32) {
-            let (screen_width, screen_height) = window.window.drawable_size();
+            let (screen_width, screen_height) = window.window.size_in_pixels();
             (screen_width as f32 * x, screen_height as f32 * y)
         }
 
@@ -494,9 +551,9 @@ impl Window {
         // event_pump doesn't have a method to peek on events
         // so, we keep track of an unconsumed one from a previous loop iteration
         // FIXME: use peek_event() from even_subsystem
-        let mut previous_event: Option<sdl2::event::Event> = None;
+        let mut previous_event: Option<sdl3::event::Event> = None;
         while self.enable_event_polling {
-            use sdl2::event::Event as E;
+            use sdl3::event::Event as E;
             let event = if let Some(e) = previous_event.take() {
                 match e {
                     E::Unknown { .. } => (),
@@ -550,14 +607,14 @@ impl Window {
                     mouse_btn: MouseButton::Left,
                     ..
                 } => {
-                    let coords = transform_input_coords(self, (x as f32, y as f32), false);
+                    let coords = transform_input_coords(self, (x, y), false);
                     log_dbg!("MouseButtonDown x {}, y {}, coords {:?}", x, y, coords);
                     Event::TouchesDown(HashMap::from([(FingerId::Mouse, coords)]))
                 }
                 E::MouseMotion {
                     x, y, mousestate, ..
                 } if mousestate.left() => {
-                    let coords = transform_input_coords(self, (x as f32, y as f32), false);
+                    let coords = transform_input_coords(self, (x, y), false);
                     log_dbg!("MouseMotion x {}, y {}, coords {:?}", x, y, coords);
                     Event::TouchesMove(HashMap::from([(FingerId::Mouse, coords)]))
                 }
@@ -567,7 +624,7 @@ impl Window {
                     mouse_btn: MouseButton::Left,
                     ..
                 } => {
-                    let coords = transform_input_coords(self, (x as f32, y as f32), false);
+                    let coords = transform_input_coords(self, (x, y), false);
                     log_dbg!("MouseButtonUp x {}, y {}, coords {:?}", x, y, coords);
                     Event::TouchesUp(HashMap::from([(FingerId::Mouse, coords)]))
                 }
@@ -679,9 +736,7 @@ impl Window {
                     let Some((x, y, w, h)) = options.stick_to_touch else {
                         continue;
                     };
-                    if axis == sdl2::controller::Axis::LeftX
-                        || axis == sdl2::controller::Axis::LeftY
-                    {
+                    if axis == sdl3::gamepad::Axis::LeftX || axis == sdl3::gamepad::Axis::LeftY {
                         let (stick_x, stick_y, _) = self.get_controller_stick(options, true);
                         let coords = transform_input_coords(
                             self,
@@ -816,7 +871,7 @@ impl Window {
                     }
                 }
                 E::KeyDown {
-                    keycode: Some(sdl2::keyboard::Keycode::F12),
+                    keycode: Some(sdl3::keyboard::Keycode::F12),
                     ..
                 } => {
                     // Log this so you can tell when touchHLE has received
@@ -825,14 +880,14 @@ impl Window {
                     Event::EnterDebugger
                 }
                 E::KeyDown {
-                    keycode: Some(sdl2::keyboard::Keycode::Backspace),
+                    keycode: Some(sdl3::keyboard::Keycode::Backspace),
                     ..
                 } => {
                     log_dbg!("SDL TextInput Backspace");
                     Event::TextInput(TextInputEvent::Backspace)
                 }
                 E::KeyDown {
-                    keycode: Some(sdl2::keyboard::Keycode::Return),
+                    keycode: Some(sdl3::keyboard::Keycode::Return),
                     ..
                 } => {
                     log_dbg!("SDL TextInput Return");
@@ -877,19 +932,25 @@ impl Window {
     }
 
     fn controller_added(&mut self, joystick_idx: u32) {
-        let Ok(controller) = self.controller_ctx.open(joystick_idx) else {
+        let Ok(controller) = self
+            .controller_ctx
+            .open(sdl3_sys::joystick::SDL_JoystickID(joystick_idx))
+        else {
             log!("Warning: A new controller was connected, but it couldn't be accessed!");
             return;
         };
 
         let controller_name = controller.name();
-        if env::consts::OS == "android" && controller_name.starts_with("uinput-") {
-            log!("ignoring fingerprint device: {}", controller_name);
+        if env::consts::OS == "android"
+            && controller_name
+                .as_ref()
+                .is_some_and(|name| name.starts_with("uinput-"))
+        {
+            log!("ignoring fingerprint device: {}", controller_name.unwrap());
             return;
         }
         log!(
-            "New controller connected: {}. Left stick = device tilt. Right stick = touch input (press the stick or shoulder button to tap/hold).",
-            controller_name
+            "New controller connected: {:?}. Left stick = device tilt. Right stick = touch input (press the stick or shoulder button to tap/hold).", controller_name
         );
         self.controllers.push(controller);
     }
@@ -897,12 +958,18 @@ impl Window {
         let Some(idx) = self
             .controllers
             .iter()
-            .position(|controller| controller.instance_id() == instance_id)
+            .position(|controller| controller.id().is_ok_and(|id| id == instance_id))
         else {
             return;
         };
         let controller = self.controllers.remove(idx);
-        log!("Warning: Controller disconnected: {}", controller.name());
+        log!(
+            "Warning: Controller disconnected: {}",
+            controller
+                .name()
+                .as_ref()
+                .map_or("[No Name Provided]", |s| s.as_str())
+        );
     }
     pub fn print_accelerometer_notice(&self, options: &Options) {
         log!("This app uses the accelerometer.");
@@ -939,15 +1006,15 @@ impl Window {
         if self.controllers.is_empty() || !options.analog_stick_tilt_controls {
             if let Some(ref accelerometer) = self.accelerometer {
                 let data = accelerometer.get_data().unwrap();
-                let sdl2::sensor::SensorData::Accel(data) = data else {
+                let sdl3::sensor::SensorData::Accel(data) = data else {
                     panic!();
                 };
                 let [x, y, z] = data;
-                // UIAcceleration reports acceleration towards gravity, but SDL2
+                // UIAcceleration reports acceleration towards gravity, but SDL3
                 // reports acceleration away from gravity.
                 let (x, y, z) = (-x, -y, -z);
                 // UIAcceleration reports acceleration in units of g-force, but
-                // SDL2 reports acceleration in units of m/s^2.
+                // SDL3 reports acceleration in units of m/s^2.
                 let gravity: f32 = 9.80665; // SDL_STANDARD_GRAVITY
                 let (x, y, z) = (x / gravity, y / gravity, z / gravity);
                 return (x, y, z);
@@ -1119,7 +1186,7 @@ impl Window {
         let (mut x, mut y) = (0.0, 0.0);
         let mut pressed = false;
         for controller in &self.controllers {
-            use sdl2::controller::{Axis, Button};
+            use sdl3::gamepad::{Axis, Button};
             let (x_axis, y_axis, button1, button2) = if left {
                 (
                     Axis::LeftX,
@@ -1150,23 +1217,28 @@ impl Window {
         match version {
             GLVersion::GLES11 => {
                 attr.set_context_version(1, 1);
-                attr.set_context_profile(sdl2::video::GLProfile::GLES);
+                attr.set_context_profile(sdl3::video::GLProfile::GLES);
             }
             GLVersion::GL21Compat => {
                 attr.set_context_version(2, 1);
-                attr.set_context_profile(sdl2::video::GLProfile::Compatibility);
+                attr.set_context_profile(sdl3::video::GLProfile::Compatibility);
             }
         }
 
-        let gl_ctx = self.window.gl_create_context()?;
+        let gl_ctx = self
+            .window
+            .gl_create_context()
+            .map_err(|e| format!("{e}"))?;
 
         Ok(GLContext(gl_ctx))
     }
 
     pub fn gl_get_proc_address(&self, procname: &str) -> *const std::ffi::c_void {
-        // For some reason, rust-sdl2 uses *const (), but () is not meant to be
+        // For some reason, rust-sdl3 uses *const (), but () is not meant to be
         // used for void pointees (just void results), so let's fix that.
-        self.video_ctx.gl_get_proc_address(procname) as *const _
+        self.video_ctx
+            .gl_get_proc_address(procname)
+            .map_or(std::ptr::null(), |p| p as *const _)
     }
 
     pub fn set_share_with_current_context(&self, value: bool) {
@@ -1192,7 +1264,11 @@ impl Window {
                 .unwrap()
                 .make_current_unchecked_for_window(
                     &mut |gl_ctx| self.window.gl_make_current(&gl_ctx.0).unwrap(),
-                    &mut |s| self.video_ctx.gl_get_proc_address(s) as *const _,
+                    &mut |s| {
+                        self.video_ctx
+                            .gl_get_proc_address(s)
+                            .map_or(std::ptr::null(), |p| p as *const _)
+                    },
                 )
         };
         gl_ins
@@ -1216,7 +1292,11 @@ impl Window {
                 .unwrap()
                 .make_current_unchecked_for_window(
                     &mut |gl_ctx| self.window.gl_make_current(&gl_ctx.0).unwrap(),
-                    &mut |s| self.video_ctx.gl_get_proc_address(s) as *const _,
+                    &mut |s| {
+                        self.video_ctx
+                            .gl_get_proc_address(s)
+                            .map_or(std::ptr::null(), |p| p as *const _)
+                    },
                 );
 
             use crate::gles::gles11_raw as gles11; // constants only
@@ -1282,7 +1362,7 @@ impl Window {
 
         if !self.fullscreen && !Self::rotatable_fullscreen() {
             let (width, height) = if Self::rotatable_fullscreen() {
-                set_sdl2_orientation(new_orientation);
+                set_sdl3_orientation(new_orientation);
                 rotate_fullscreen_size(new_orientation, self.window.size())
             } else {
                 size_for_orientation(self.device_family, new_orientation, self.scale_hack)
@@ -1306,24 +1386,20 @@ impl Window {
         }
 
         if Self::rotatable_fullscreen() {
-            set_sdl2_orientation(new_orientation);
-            // Hack: from reading SDL2's source code, it seems that SDL2 will
+            set_sdl3_orientation(new_orientation);
+            // Hack: from reading SDL3's source code, it seems that SDL3 will
             // only re-do the orientation when changing whether a window is
             // "resizeable" (can be rotated). You can't set the resizeable state
             // on a fullscreen window, so it must be temporarily stop being
             // fulscreen.
             // Apparently, doing this does result in resizing the window.
-            self.window
-                .set_fullscreen(sdl2::video::FullscreenType::Off)
-                .unwrap();
+            self.window.set_fullscreen(false).unwrap();
             unsafe {
                 let window_raw = self.window.raw();
-                sdl2_sys::SDL_SetWindowResizable(window_raw, sdl2_sys::SDL_bool::SDL_FALSE);
-                sdl2_sys::SDL_SetWindowResizable(window_raw, sdl2_sys::SDL_bool::SDL_TRUE);
+                sdl3_sys::video::SDL_SetWindowResizable(window_raw, false);
+                sdl3_sys::video::SDL_SetWindowResizable(window_raw, true);
             }
-            self.window
-                .set_fullscreen(sdl2::video::FullscreenType::True)
-                .unwrap();
+            self.window.set_fullscreen(true).unwrap();
         }
 
         self.device_orientation = new_orientation;
@@ -1366,7 +1442,7 @@ impl Window {
             return (0, 0, app_width, app_height);
         }
 
-        let (screen_width, screen_height) = self.window.drawable_size();
+        let (screen_width, screen_height) = self.window.size_in_pixels();
 
         let app_aspect = app_width as f32 / app_height as f32;
         let screen_aspect = screen_width as f32 / screen_height as f32;
@@ -1419,17 +1495,22 @@ impl Window {
         }
     }
 
-    pub fn start_text_input(&self) {
+    pub fn locales(&self) -> Locales {
         assert!(self.on_main_stack);
         unsafe {
-            sdl2_sys::SDL_StartTextInput();
+            let mut size = 0;
+            let locales = sdl3_sys::locale::SDL_GetPreferredLocales(&mut size);
+            Locales::from_sdl_locales(locales, size.try_into().unwrap())
         }
+    }
+
+    pub fn start_text_input(&self) {
+        assert!(self.on_main_stack);
+        self.window.subsystem().text_input().start(&self.window);
     }
     pub fn stop_text_input(&self) {
         assert!(self.on_main_stack);
-        unsafe {
-            sdl2_sys::SDL_StopTextInput();
-        }
+        self.window.subsystem().text_input().stop(&self.window);
     }
 
     pub fn on_main_stack(&self) -> bool {
@@ -1438,7 +1519,59 @@ impl Window {
 }
 
 pub fn open_url(env: &mut Environment, url: &str) -> Result<(), String> {
-    env.on_parent_stack_in_coroutine(|_, _| sdl2::url::open_url(url).map_err(|e| e.to_string()))
+    env.on_parent_stack_in_coroutine(|_, _| sdl3::url::open_url(url).map_err(|e| e.to_string()))
+}
+
+// Unfortunately Rust-SDL3 doesn't provide a wrapper for this yet, so we have to
+// make our own.
+pub struct Locales {
+    // Owned by object
+    arr: *mut *mut sdl3_sys::locale::SDL_Locale,
+    size: usize,
+}
+
+impl Locales {
+    /// Makes an iterator over SDL locales.
+    /// SAFETY: locales must be returned from
+    /// [sdl3_sys::locale::SDL_GetPreferredLocales()], and the size must be
+    /// the returned size.
+    unsafe fn from_sdl_locales(
+        locales: *mut *mut sdl3_sys::locale::SDL_Locale,
+        size: usize,
+    ) -> Self {
+        Self { arr: locales, size }
+    }
+
+    fn as_slice_raw(&self) -> &[*mut sdl3_sys::locale::SDL_Locale] {
+        unsafe { slice::from_raw_parts(self.arr, self.size) }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = Locale<'_>> {
+        self.as_slice_raw().iter().map(|loc| unsafe {
+            assert!(!(**loc).language.is_null());
+            let country = if (**loc).country.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr((**loc).country))
+            };
+            Locale {
+                language: CStr::from_ptr((**loc).language),
+                country,
+            }
+        })
+    }
+}
+
+impl Drop for Locales {
+    fn drop(&mut self) {
+        unsafe { sdl3_sys::stdinc::SDL_free(self.arr.cast()) };
+    }
+}
+
+#[allow(unused)]
+pub struct Locale<'a> {
+    pub language: &'a CStr,
+    pub country: Option<&'a CStr>,
 }
 
 /// Show an SDL messagebox for an error (typically after a panic).
@@ -1447,7 +1580,7 @@ pub fn open_url(env: &mut Environment, url: &str) -> Result<(), String> {
 /// messagebox, which is not required but should be done if possible.
 pub fn show_error_messagebox(window: Option<&Window>, error_message: &str) {
     assert!(window.is_none_or(|win| win.on_main_stack));
-    use sdl2::messagebox;
+    use sdl3::messagebox;
     let mbox = [
         messagebox::ButtonData {
             flags: messagebox::MessageBoxButtonFlag::NOTHING,
@@ -1479,7 +1612,7 @@ pub fn show_error_messagebox(window: Option<&Window>, error_message: &str) {
                 // Open data directory (contains log file on android)
                 0 => match crate::paths::url_for_opening_user_data_dir() {
                     Ok(url) => {
-                        if let Err(e) = sdl2::url::open_url(&url).map_err(|e| e.to_string()) {
+                        if let Err(e) = sdl3::url::open_url(&url).map_err(|e| e.to_string()) {
                             echo!("Couldn't open file manager at {:?}: {}", url, e);
                         } else {
                             echo!("Opened file manager at {:?}, exiting.", url);
@@ -1495,7 +1628,7 @@ pub fn show_error_messagebox(window: Option<&Window>, error_message: &str) {
     }
 }
 
-/// Get current battery state from SDL2.
+/// Get current battery state from SDL3.
 ///
 /// Returns:
 /// - pct: i32 - percentage of battery remaining.
@@ -1503,34 +1636,40 @@ pub fn show_error_messagebox(window: Option<&Window>, error_message: &str) {
 ///   (unplugged, charging, full, etc.)
 pub fn get_battery_status() -> (i32, BatteryState) {
     let mut pct = 0;
-    // Unfortunately, Rust-SDL2 does not expose this function yet.
+    // Unfortunately, Rust-SDL3 does not expose this function yet.
     // iPhoneOS does not measure the battery in seconds remaining,
     // so we discard this argument.
-    let status = unsafe { sdl2_sys::SDL_GetPowerInfo(null_mut(), &mut pct) };
+    let status = unsafe { sdl3_sys::power::SDL_GetPowerInfo(null_mut(), &mut pct) };
     (
         pct,
         match status {
-            SDL_PowerState::SDL_POWERSTATE_UNKNOWN => BatteryState::Unknown,
-            SDL_PowerState::SDL_POWERSTATE_ON_BATTERY => BatteryState::OnBattery,
-            SDL_PowerState::SDL_POWERSTATE_NO_BATTERY => BatteryState::NoBattery,
-            SDL_PowerState::SDL_POWERSTATE_CHARGING => BatteryState::Charging,
-            SDL_PowerState::SDL_POWERSTATE_CHARGED => BatteryState::Full,
+            SDL_PowerState::UNKNOWN => BatteryState::Unknown,
+            SDL_PowerState::ON_BATTERY => BatteryState::OnBattery,
+            SDL_PowerState::NO_BATTERY => BatteryState::NoBattery,
+            SDL_PowerState::CHARGING => BatteryState::Charging,
+            SDL_PowerState::CHARGED => BatteryState::Full,
+            _ => unreachable!(),
         },
     )
 }
 
 pub fn get_preferred_language_codes(env: &mut Environment) -> Vec<String> {
-    env.on_parent_stack_in_coroutine(|_, _| {
-        sdl2::locale::get_preferred_locales()
-            .map(|loc| loc.lang)
+    env.on_parent_stack_in_coroutine(|window, _| {
+        window
+            .locales()
+            .iter()
+            .map(|loc| loc.language.to_string_lossy().to_string())
             .collect()
     })
 }
 
 pub fn get_preferred_country_codes(env: &mut Environment) -> Vec<String> {
-    env.on_parent_stack_in_coroutine(|_, _| {
-        sdl2::locale::get_preferred_locales()
+    env.on_parent_stack_in_coroutine(|window, _| {
+        window
+            .locales()
+            .iter()
             .filter_map(|loc| loc.country)
+            .map(|ctr| ctr.to_string_lossy().to_string())
             .collect()
     })
 }

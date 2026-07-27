@@ -31,6 +31,18 @@ Of course, we aspire to have cross-compilation work cleanly for all platforms, b
 
 ## Prerequisites
 
+### Setup (Windows/MacOS)
+
+Please note that [ANGLE](https://chromium.googlesource.com/angle/angle/) is now the default for macOS and Windows, and in the future it will become the only graphics backend for those platforms. Due to limitations of Github Actions and the complexity of building ANGLE, **ANGLE is not automatically build as part of touchHLE**.
+
+To set it up, you have 2 options:
+- [Download it](https://github.com/abnormalmaps/build-angle) from our Github Actions (TODO: point this to our link!)
+- Build it from our repository (TODO: link this!), and build it yourself. Follow [ANGLE's development setup guide](https://chromium.googlesource.com/angle/angle/+/HEAD/doc/DevSetup.md), but instead of using `fetch`, `git clone` our repository, then call `gclient sync` inside the repository. When possible, use the same `gn args` as our builds in the github actions (see the `COMMON_ARGS` of your relevant build script in the build-angle repository).
+
+Regardless of how you obtain it, place the files `libGLESv1_CM.(dll/dylib)`, `libGLESv2.(dll/dylib)`, `libEGL.(dll/dylib)`, and `d3dcompiler_47.dll` (on windows only) in the root directory of the touchHLE repository.
+
+Alternatively, set the flag `--use-angle=false` (either manually or with the line `org.touchhle.all: --use-angle=false` in your `touchHLE_options.txt`). **Please not that this will not be supported soon, so we strongly recommend you do the former!**
+
 ### General
 
 You need [git](https://git-scm.com/), [the Rust toolchain](https://www.rust-lang.org/tools/install), [CMake](https://cmake.org/), and your platform's standard C and C++ compilers.
@@ -64,7 +76,7 @@ This has been tested on macOS 12.7.6 with Android Studio 2024.3.2 Patch 1 and ND
 
 With the prerequisites installed, `cargo run --release` (for a release build) or `cargo run` (for a debug build) should be enough to build and run touchHLE. On an underpowered, passively-cooled, 2-core laptop (2017 Retina MacBook), a clean release build takes a bit less than 9 minutes.
 
-touchHLE can also be dynamically linked (which means instead of using the bundled dependencies, it will use the dependencies provided by your system). To build a dynamically linked version of touchHLE, you will need to have the SDL2 and OpenAL shared libraries installed, and then you can append `--no-default-features` (this flag is passed in to disable static linking, which is the default) to the end of the cargo build command. For macOS users: Apple's OpenAL.framework is not supported, only OpenAL Soft, and you need to add it to the linker path yourself.
+touchHLE can also be dynamically linked (which means instead of using the bundled dependencies, it will use the dependencies provided by your system). To build a dynamically linked version of touchHLE, you will need to have the SDL3 and OpenAL shared libraries installed, and then you can append `--no-default-features` (this flag is passed in to disable static linking, which is the default) to the end of the cargo build command. For macOS users: Apple's OpenAL.framework is not supported, only OpenAL Soft, and you need to add it to the linker path yourself.
 
 ### Android
 

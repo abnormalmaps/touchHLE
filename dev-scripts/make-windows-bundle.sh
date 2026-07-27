@@ -15,6 +15,7 @@ if [[ $# == 1 ]]; then
     cp -r ../touchHLE_dylibs touchHLE_windows_bundle/
     cp -r ../touchHLE_fonts touchHLE_windows_bundle/
     cp -r ../touchHLE_default_options.txt touchHLE_windows_bundle/
+    cp ../libGLESv1_CM.dll ../libGLESv2.dll ../libEGL.dll ../d3dcompiler_47.dll touchHLE_windows_bundle/
 else
     echo "Incorrect usage."
     exit 1

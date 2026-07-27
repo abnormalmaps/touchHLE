@@ -17,6 +17,11 @@
 # output. To get a list of possible options, see OPTIONS_HELP.txt or run
 # touchHLE with the --help flag.
 #
+# The special app names "org.touchhle.all" and "org.touchhle.[os]", apply
+# options to all apps and all apps on a specified host OS respectively.
+# App-specific options take precedence over os-specific options, which
+# take prcedence over general options.
+#
 # Text on a line following a hash sign (#) is treated as a comment and ignored.
 # Empty lines are also ignored.
 #
@@ -30,6 +35,14 @@
 #   accelerometer and has touch targets in predictable locations.
 # - Use --stabilize-virtual-cursor= if the game's menus are practically unusable
 #   without it.
+
+org.touchhle.windows: --use-angle=true
+org.touchhle.macos: --use-angle=true
+
+# Android only supports GLES1, so we should always have it set. Setting the
+# option is mostly so that it acts as a hit to set the GLES version before
+# we create a window, which is required on Android.
+og.touchhle.android: --gles=gles1_native
 
 # Super Monkey Ball and Super Monkey Ball Lite
 # B = speed up level intro, Start = pause
@@ -228,3 +241,6 @@ www.fishlabs.net.GalaxyOnFire: --landscape-right --button-to-touch=A,427,274 --b
 
 # Palm Heroes
 com.palmheroes.PalmHeroes: --landscape-right
+
+# Silent Hill: The Escape
+com.konami-europe.silenthillescape: --x-tilt-offset=-45

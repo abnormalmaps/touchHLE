@@ -73,7 +73,7 @@ macro_rules! echo {
 
             #[cfg(target_os = "android")]
             {
-                sdl2::log::log(&formatted_str);
+                sdl3::log::log(&formatted_str);
             }
             #[cfg(not(target_os = "android"))]
             eprintln!("{}", formatted_str);
@@ -88,7 +88,7 @@ macro_rules! echo {
         {
             #[cfg(target_os = "android")]
             {
-                sdl2::log::log("");
+                sdl3::log::log("");
             }
             #[cfg(not(target_os = "android"))]
             eprintln!("");

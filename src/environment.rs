@@ -42,7 +42,7 @@ pub type HostContext = Coroutine<Environment, Environment, Environment>;
 /// Bookkeeping for a thread.
 pub struct Thread {
     /// Once a thread finishes, this is set to false.
-    pub active: bool,
+    pub state: ThreadState,
     /// If this is not [ThreadBlock::NotBlocked], the thread is not executing
     /// until a certain condition is fufilled.
     pub blocked_by: ThreadBlock,
@@ -75,14 +75,20 @@ impl Thread {
     fn is_blocked(&self) -> bool {
         !matches!(self.blocked_by, ThreadBlock::NotBlocked)
     }
+    pub fn is_alive(&self) -> bool {
+        !matches!(self.state, ThreadState::Dead)
+    }
+    pub fn is_running(&self) -> bool {
+        matches!(self.state, ThreadState::Running | ThreadState::Stepping)
+    }
 }
 
 impl std::fmt::Debug for Thread {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Thread {{ active: {:?}, blocked_by: {:?}, return_value: {:?} }}",
-            self.active, self.blocked_by, self.return_value
+            "Thread {{ state: {:?}, blocked_by: {:?}, return_value: {:?} }}",
+            self.state, self.blocked_by, self.return_value
         )
     }
 }
@@ -157,6 +163,40 @@ pub enum ThreadBlock {
     FileObjectLock(MutPtr<FILE>),
 }
 
+impl std::fmt::Display for ThreadBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ThreadBlock::NotBlocked => write!(f, "Running"),
+            ThreadBlock::Sleeping(wake_time) => {
+                let remaining = wake_time.checked_duration_since(Instant::now());
+                match remaining {
+                    Some(dur) => write!(f, "Sleeping for {:.3}s", dur.as_secs_f32()),
+                    None => write!(f, "Waking"),
+                }
+            }
+            ThreadBlock::Mutex(ptr) => write!(f, "Blocked on mutex {ptr:?}"),
+            ThreadBlock::Semaphore(ptr) => write!(f, "Blocked on semaphore {ptr:?}"),
+            ThreadBlock::Condition(ptr, _) => write!(f, "Blocked on condition {ptr:?}"),
+            // tid adds 1 to match gdb's thread numbers
+            ThreadBlock::Joining(tid, _) => write!(f, "Joining on thread {}", tid + 1),
+            ThreadBlock::Suspended(count, old) => {
+                write!(f, "Suspended (count {}, previously {})", count, old)
+            }
+            ThreadBlock::FileObjectLock(ptr) => write!(f, "Waiting for file to unlock {ptr:?}"),
+            // Unlikely to be seen
+            ThreadBlock::WaitingForDebugger(_) => write!(f, "Waiting for debugger"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ThreadState {
+    Running,
+    Stepping,
+    Paused,
+    Dead,
+}
+
 struct BinaryDependencyNode {
     name: String,
     dependencies: Vec<String>,
@@ -177,7 +217,7 @@ fn generate_binary_load_order(graph: &[BinaryDependencyNode]) -> Result<Vec<usiz
     for node in graph {
         let &bin_index = node_to_index
             .get(node.name.as_str())
-            .ok_or_else(|| format!("Failed to find {:?} name mapping", &node.name))?;
+            .ok_or_else(|| format!("Failed to find {:?} name mapping", node.name))?;
 
         // Bin names dont include prefix while dynamic lib paths do
         for dependency in node
@@ -609,7 +649,7 @@ impl Environment {
             env
         });
         let main_thread = Thread {
-            active: true,
+            state: ThreadState::Running,
             blocked_by: ThreadBlock::NotBlocked,
             return_value: None,
             guest_context: None,
@@ -669,10 +709,7 @@ impl Environment {
                 .accept()
                 .map_err(|e| format!("Could not accept connection: {e}"))?;
             echo!("Debugger client connected on {}.", client_addr);
-            let mut gdb_server = gdb::GdbServer::new(client);
-            let step = gdb_server.wait_for_debugger(None, &mut env.cpu, &mut env.mem);
-            assert!(!step, "Can't step right now!"); // TODO?
-            env.gdb_server = Some(Box::new(gdb_server));
+            env.gdb_server = Some(Box::new(gdb::GdbServer::new(client)));
         }
 
         if env.options.dumping_options.linking_info {
@@ -744,7 +781,7 @@ impl Environment {
         });
 
         let main_thread = Thread {
-            active: true,
+            state: ThreadState::Running,
             blocked_by: ThreadBlock::NotBlocked,
             return_value: None,
             guest_context: None,
@@ -918,7 +955,7 @@ impl Environment {
         );
         self.cpu.dump_regs();
         for (tid, thread) in self.threads.iter().enumerate() {
-            if thread.active && tid != self.current_thread {
+            if thread.is_alive() && tid != self.current_thread {
                 echo_no_panic!(
                     "Dumping registers for thread #{} (blocked by {:?})",
                     tid,
@@ -942,33 +979,49 @@ impl Environment {
                 self.current_thread
             );
         }
-        self.stack_trace_for_thread(self.current_thread);
+        // Ok to use panicking version since we catch it
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.stack_trace_for_thread(self.current_thread, |string| echo!("{}", string));
+        }));
     }
 
-    fn stack_trace_all(&self) {
-        echo_no_panic!(
+    pub fn stack_trace_all(&self) {
+        // Ok to use panicking version since we catch it
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.stack_trace_all_callback(|string| echo!("{}", string));
+        }));
+    }
+
+    /// Perform a stack trace on all threads, providing the strings to a
+    /// callback. Note that a newline should be appended after each call, as
+    /// they are not added itself.
+    pub fn stack_trace_all_callback<F: FnMut(String)>(&self, mut callback: F) {
+        callback(format!(
             "Attempting to produce stack trace for current thread (#{}):",
             self.current_thread
-        );
-        self.stack_trace_for_thread(self.current_thread);
+        ));
+        self.stack_trace_for_thread(self.current_thread, &mut callback);
         for tid in 0..self.threads.len() {
-            if self.threads[tid].active && tid != self.current_thread {
-                echo_no_panic!("Attempting to produce stack trace for thread #{}:", tid);
-                self.stack_trace_for_thread(tid);
+            if self.threads[tid].is_alive() && tid != self.current_thread {
+                callback(format!(
+                    "Attempting to produce stack trace for thread #{}:",
+                    tid
+                ));
+                self.stack_trace_for_thread(tid, &mut callback);
             }
         }
     }
 
-    fn stack_trace_for_thread(&self, tid: usize) {
+    fn stack_trace_for_thread<F: FnMut(String)>(&self, tid: usize, mut callback: F) {
         if tid >= self.threads.len() {
-            echo_no_panic!(
+            callback(format!(
                 "Thread {} is too large ({} threads exist)!",
                 tid,
                 self.threads.len()
-            );
+            ));
         }
         let Some(stack_range) = self.threads[tid].stack.clone() else {
-            echo_no_panic!("Failed to get stack trace!");
+            callback("Failed to get stack trace!".to_string());
             return;
         };
         let (regs, cpsr) = if self.current_thread == tid {
@@ -977,7 +1030,7 @@ impl Environment {
             (*self.cpu.regs(), self.cpu.cpsr())
         } else {
             let Some(ctx) = self.threads[tid].guest_context.as_ref() else {
-                echo_no_panic!("Failed to get registers for thread {}!", tid);
+                callback(format!("Failed to get registers for thread {}!", tid));
                 return;
             };
             (ctx.regs, ctx.cpsr)
@@ -985,34 +1038,34 @@ impl Environment {
         let pc_nothumb = regs[cpu::Cpu::PC];
         let thumb = (cpsr & cpu::Cpu::CPSR_THUMB) == cpu::Cpu::CPSR_THUMB;
         let pc = GuestFunction::from_addr_and_thumb_flag(pc_nothumb, thumb);
-        echo_no_panic!(" 0. {:#x} (PC)", pc.addr_with_thumb_bit());
+        callback(format!(" 0. {:#x} (PC)", pc.addr_with_thumb_bit()));
         let mut lr = regs[cpu::Cpu::LR];
         let return_to_host_routine_addr = self.dyld.return_to_host_routine().addr_with_thumb_bit();
         let thread_exit_routine_addr = self.dyld.thread_exit_routine().addr_with_thumb_bit();
         if lr == return_to_host_routine_addr {
-            echo_no_panic!(" 1. [host function] (LR)");
+            callback(" 1. [host function] (LR)".to_string());
         } else if lr == thread_exit_routine_addr {
-            echo_no_panic!(" 1. [thread exit] (LR)");
+            callback(" 1. [thread exit] (LR)".to_string());
             return;
         } else {
-            echo_no_panic!(" 1. {:#x} (LR)", lr);
+            callback(format!(" 1. {:#x} (LR)", lr));
         }
         let mut i = 2;
         let mut fp: mem::ConstPtr<u8> = mem::Ptr::from_bits(regs[abi::FRAME_POINTER]);
         loop {
             if !stack_range.contains(&fp.to_bits()) {
-                echo_no_panic!("Next FP ({:?}) is outside the stack.", fp);
+                callback(format!("Next FP ({:?}) is outside the stack.", fp));
                 break;
             }
             lr = self.mem.read((fp + 4).cast());
             fp = self.mem.read(fp.cast());
             if lr == return_to_host_routine_addr {
-                echo_no_panic!("{:2}. [host function]", i);
+                callback(format!("{:2}. [host function]", i));
             } else if lr == thread_exit_routine_addr {
-                echo_no_panic!("{:2}. [thread exit]", i);
+                callback(format!("{:2}. [thread exit]", i));
                 return;
             } else {
-                echo_no_panic!("{:2}. {:#x}", i, lr);
+                callback(format!("{:2}. {:#x}", i, lr));
             }
             i += 1;
         }
@@ -1047,7 +1100,7 @@ impl Environment {
                         start_routine.call_from_host(env, (user_data,));
                     let curr_thread = &mut env.threads[env.current_thread];
                     curr_thread.return_value = Some(return_value);
-                    curr_thread.active = false;
+                    curr_thread.state = ThreadState::Dead;
                 });
             }));
             if let Err(e) = res {
@@ -1059,7 +1112,7 @@ impl Environment {
         });
 
         self.threads.push(Thread {
-            active: true,
+            state: ThreadState::Running,
             blocked_by: ThreadBlock::NotBlocked,
             return_value: None,
             guest_context: Some(Box::new(cpu::CpuContext::new())),
@@ -1291,9 +1344,12 @@ impl Environment {
     pub fn run(mut self) {
         let mut curr_host_context = self.threads[0].host_context.take().unwrap();
         let panic_cell = self.panic_cell.clone();
-        let mut stepping = false;
+        if let Some(mut gdb_server) = self.gdb_server.take() {
+            gdb_server.wait_for_debugger(None, &mut self);
+            self.gdb_server = Some(gdb_server);
+        }
         loop {
-            if stepping {
+            if self.threads[self.current_thread].state == ThreadState::Stepping {
                 self.remaining_ticks = None;
             } else {
                 // 100,000 ticks is an arbitrary number. It needs to be
@@ -1385,32 +1441,11 @@ impl Environment {
                     window.poll_for_events(&self.options);
                 }
                 let curr_thread_block = self.threads[self.current_thread].blocked_by.clone();
-                if stepping || matches!(curr_thread_block, ThreadBlock::WaitingForDebugger(_)) {
-                    if old_context.is_none() {
-                        let old_thread = self.current_thread;
-                        let next_thread = self.schedule_next_thread();
-                        self.switch_thread(&mut old_context, next_thread);
-                        echo!(
-                            "\nGDB WARNING ------- Thread {} has exited - switched thread to {}",
-                            old_thread,
-                            next_thread
-                        );
-                    }
-                    match self.threads[self.current_thread].blocked_by {
-                        ThreadBlock::NotBlocked | ThreadBlock::WaitingForDebugger(_) => {}
-                        _ => {
-                            let old_thread = self.current_thread;
-                            let next_thread = self.schedule_next_thread();
-                            self.switch_thread(&mut old_context, next_thread);
-                            let block = &self.threads[old_thread].blocked_by;
-                            echo!(
-                                "\nGDB WARNING ------- Thread {} is blocked by {:?} - switched thread to {}",
-                                old_thread,
-                                block,
-                                next_thread
-                            );
-                        }
-                    }
+                if matches!(
+                    self.threads[self.current_thread].state,
+                    ThreadState::Stepping
+                ) || matches!(curr_thread_block, ThreadBlock::WaitingForDebugger(_))
+                {
                     let reason = if let ThreadBlock::WaitingForDebugger(reason) = curr_thread_block
                     {
                         self.threads[self.current_thread].blocked_by = ThreadBlock::NotBlocked;
@@ -1418,23 +1453,18 @@ impl Environment {
                     } else {
                         None
                     };
-                    let will_step = self.gdb_server.as_deref_mut().unwrap().wait_for_debugger(
-                        reason.clone(),
-                        self.cpu.as_mut(),
-                        self.mem.as_mut(),
-                    );
-                    if will_step {
-                        stepping = true;
-                    }
+                    let mut gdb_server = self.gdb_server.take().unwrap();
+                    gdb_server.wait_for_debugger(reason.clone(), &mut self);
+                    self.gdb_server = Some(gdb_server);
+                } else if self
+                    .gdb_server
+                    .as_mut()
+                    .is_some_and(|server| server.break_was_sent())
+                {
+                    let mut gdb_server = self.gdb_server.take().unwrap();
+                    gdb_server.wait_for_debugger(Some(cpu::CpuError::Interrupt), &mut self);
+                    self.gdb_server = Some(gdb_server);
                 }
-
-                // Don't switch threads if stepping.
-                if stepping {
-                    assert!(old_context.is_some());
-                    return;
-                }
-
-                stepping = false;
 
                 let next_thread = self.schedule_next_thread();
                 if next_thread != self.current_thread {
@@ -1500,7 +1530,7 @@ impl Environment {
     /// This also internally switches the currently used guest context.
     fn switch_thread(&mut self, old_context: &mut Option<HostContext>, new_thread: ThreadId) {
         assert!(new_thread != self.current_thread);
-        assert!(self.threads[new_thread].active);
+        assert!(self.threads[new_thread].is_running());
 
         log_dbg!(
             "Switching thread: {} => {}",
@@ -1511,7 +1541,7 @@ impl Environment {
         let mut guest_ctx = self.threads[new_thread].guest_context.take().unwrap();
         self.cpu.swap_context(&mut guest_ctx);
         assert!(self.threads[self.current_thread].guest_context.is_none());
-        assert!(old_context.is_some() || !self.threads[self.current_thread].active);
+        assert!(old_context.is_some() || !self.threads[self.current_thread].is_alive());
         self.threads[self.current_thread].guest_context = Some(guest_ctx);
 
         let new_host_ctx = self.threads[new_thread].host_context.take().unwrap();
@@ -1628,7 +1658,7 @@ impl Environment {
 
     fn run_inner(&mut self) {
         let initial_thread = self.current_thread;
-        assert!(self.threads[initial_thread].active);
+        assert!(self.threads[initial_thread].is_running());
         assert!(self.threads[initial_thread].guest_context.is_none());
 
         loop {
@@ -1641,14 +1671,15 @@ impl Environment {
                     .run_or_step(&mut self.mem, self.remaining_ticks.as_mut());
 
                 match self.handle_cpu_state(state) {
-                    ThreadNextAction::Continue => {}
+                    ThreadNextAction::Continue => {
+                        if self.remaining_ticks.is_none() {
+                            break;
+                        }
+                    }
                     ThreadNextAction::ReturnToHost => return,
                     ThreadNextAction::DebugCpuError(e) => {
                         self.debug_cpu_error(e);
                     }
-                }
-                if self.remaining_ticks.is_none() {
-                    break;
                 }
             }
             self.yield_thread(ThreadBlock::NotBlocked);
@@ -1710,7 +1741,7 @@ impl Environment {
                 let thread_id = (self.current_thread + 1 + i) % self.threads.len();
                 let candidate = &mut self.threads[thread_id];
 
-                if !candidate.active {
+                if !candidate.is_running() {
                     continue;
                 }
                 match candidate.blocked_by {
@@ -1800,7 +1831,7 @@ impl Environment {
                         }
                     }
                     ThreadBlock::Joining(joinee_thread, ptr) => {
-                        if !self.threads[joinee_thread].active {
+                        if !self.threads[joinee_thread].is_alive() {
                             log_dbg!(
                                 "Thread {} joining with now finished thread {}.",
                                 self.current_thread,

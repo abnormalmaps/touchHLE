@@ -19,10 +19,10 @@ jobs:
       # actions/checkout really doesn't work well with git-describe for some
       # reason (most likely it strips the annotation off the tag somehow).
       - name: Checkout touchHLE
-        shell: bash # windows :)
+        shell: bash
         run: |
           mkdir -p "$GITHUB_WORKSPACE"
-          git clone https://github.com/touchHLE/touchHLE "$GITHUB_WORKSPACE"
+          git clone https://github.com/abnormalmaps/touchHLE "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
           git fetch origin "$GITHUB_REF"
           git checkout "$GITHUB_SHA" # avoid race condition if branch/tag changes
@@ -80,6 +80,8 @@ jobs:
         run: cargo build --target x86_64-apple-darwin --release
         env:
           CMAKE: ${{ github.workspace }}/vendor/cmake/bin/cmake
+      - name: Get copy of ANGLE
+        run: mkdir ${{ runner.temp }}/angle && curl -L --output ${{ runner.temp }}/angle.zip https://github.com/abnormalmaps/build-angle/releases/latest/download/angle-mac-universal.zip  && unzip ${{ runner.temp }}/angle.zip -d ${{ runner.temp }}/angle && chmod +x ${{ runner.temp }}/angle/lib/* && cp ${{ runner.temp }}/angle/lib/* ${{ github.workspace }}
       - name: Create .app bundle
         run: cd dev-scripts && ./make-macos-bundle.sh ../target/x86_64-apple-darwin/release/touchHLE "`cargo run --package touchHLE_version`" "`cargo run --package touchHLE_version -- --branding`" && mkdir touchHLE-dmg-src && mv *.app touchHLE-dmg-src/ && hdiutil create -volname touchHLE -srcfolder touchHLE-dmg-src touchHLE.dmg && mv touchHLE.dmg ..
       - uses: actions/upload-artifact@v4
@@ -102,7 +104,7 @@ jobs:
       shell: bash # windows :)
       run: |
         mkdir -p "$GITHUB_WORKSPACE"
-        git clone https://github.com/touchHLE/touchHLE "$GITHUB_WORKSPACE"
+        git clone https://github.com/abnormalmaps/touchHLE "$GITHUB_WORKSPACE"
         cd "$GITHUB_WORKSPACE"
         git fetch origin "$GITHUB_REF"
         git checkout "$GITHUB_SHA" # avoid race condition if branch/tag changes
@@ -157,15 +159,15 @@ jobs:
       uses: actions/cache@v3
       with:
         path: android-ndk
-        key: android-ndk-r25c
+        key: android-ndk-r28c
     - if: ${{ steps.cache-android-ndk.outputs.cache-hit != 'true' }}
       name: Download Android NDK
-      run: curl -L -o android-ndk-r25c-linux.zip "https://dl.google.com/android/repository/android-ndk-r25c-linux.zip"
+      run: curl -L -o android-ndk-r28c-linux.zip "https://dl.google.com/android/repository/android-ndk-r28c-linux.zip"
     - if: ${{ steps.cache-android-ndk.outputs.cache-hit != 'true' }}
       name: Extract Android NDK
-      run: 7z -oandroid-ndk -snld x android-ndk-r25c-linux.zip
+      run: 7z -oandroid-ndk -snld x android-ndk-r28c-linux.zip
     - name: Link Android NDK
-      run: ln -s $PWD'/android-ndk/android-ndk-r25c' $ANDROID_SDK_ROOT'/ndk/25.2.9519653'
+      run: ln -s $PWD'/android-ndk/android-ndk-r28c' $ANDROID_SDK_ROOT'/ndk/28.2.13676358'
     # Why isn't there a command for this?
     - name: Generate local.properties file
       run: echo 'sdk.dir='$ANDROID_SDK_ROOT > android/local.properties
@@ -173,16 +175,18 @@ jobs:
       run: dev-scripts/lint.sh ndk -t arm64-v8a
       env:
         # The version should match the ndkVersion defined in `android\app\build.gradle`
-        ANDROID_NDK_ROOT: '/usr/local/lib/android/sdk/ndk/25.2.9519653'
-        ANDROID_NDK: '/usr/local/lib/android/sdk/ndk/25.2.9519653'
-        ANDROID_NDK_HOME: '/usr/local/lib/android/sdk/ndk/25.2.9519653'
+        ANDROID_NDK_ROOT: '/usr/local/lib/android/sdk/ndk/28.2.13676358'
+        ANDROID_NDK: '/usr/local/lib/android/sdk/ndk/28.2.13676358'
+        ANDROID_NDK_HOME: '/usr/local/lib/android/sdk/ndk/28.2.13676358'
         CMAKE: ${{ github.workspace }}/vendor/cmake/bin/cmake
+    - name: Download ANGLE
+      run: mkdir ${{ runner.temp }}/angle && mkdir -p ${{ github.workspace }}/android/app/src/main/jniLibs//arm64-v8a && curl -L --output ${{ runner.temp }}/angle.zip https://github.com/abnormalmaps/build-angle/releases/latest/download/angle-android-arm64.zip   && unzip ${{ runner.temp }}/angle.zip -d ${{ runner.temp }}/angle && chmod +x ${{ runner.temp }}/angle/arm64/lib/* && cp ${{ runner.temp }}/angle/arm64/lib/* ${{ github.workspace }}/android/app/src/main/jniLibs/arm64-v8a
     # Don't attempt to run tests (can't run on Android).
     - name: Build for Android
       run: cd android && ../gradle/gradle-8.11.1/bin/gradle assembleRelease && mv app/build/outputs/apk/release/app-release.apk ../touchHLE.apk
       env:
         # The version should match the ndkVersion defined in `android\app\build.gradle`
-        ANDROID_NDK_ROOT: '/usr/local/lib/android/sdk/ndk/25.2.9519653'
+        ANDROID_NDK_ROOT: '/usr/local/lib/android/sdk/ndk/28.2.13676358'
         CMAKE: ${{ github.workspace }}/vendor/cmake/bin/cmake
     - uses: actions/upload-artifact@v4
       with:
@@ -200,7 +204,7 @@ jobs:
       shell: bash # windows :)
       run: |
         mkdir -p "$GITHUB_WORKSPACE"
-        git clone https://github.com/touchHLE/touchHLE "$GITHUB_WORKSPACE"
+        git clone https://github.com/abnormalmaps/touchHLE "$GITHUB_WORKSPACE"
         cd "$GITHUB_WORKSPACE"
         git fetch origin "$GITHUB_REF"
         git checkout "$GITHUB_SHA" # avoid race condition if branch/tag changes
@@ -265,6 +269,8 @@ jobs:
       run: cargo build --release
       env:
         CMAKE: ${{ github.workspace }}\vendor\cmake\bin\cmake
+    - name: Get copy of ANGLE
+      run: mkdir ${{ runner.temp }}/angle && curl -L --output ${{ runner.temp }}/angle.zip https://github.com/abnormalmaps/build-angle/releases/latest/download/angle-windows-x64.zip && unzip ${{ runner.temp }}/angle.zip -d ${{ runner.temp }}/angle && chmod +x ${{ runner.temp }}/angle/bin/* && cp ${{ runner.temp }}/angle/bin/* ${{ github.workspace }}
     - name: Create bundle
       shell: bash
       run: cd dev-scripts && ./make-windows-bundle.sh ../target/release/touchHLE.exe && mv touchHLE_windows_bundle/ ..

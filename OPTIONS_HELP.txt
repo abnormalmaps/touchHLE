@@ -198,6 +198,17 @@ Graphics driver options:
         When this option isn't in use, touchHLE will try each in order and use
         the first one that works.
 
+    --use-angle=(true/false)
+        Force touchHLE to use the bundled ANGLE libraries for OpenGL. This is
+        the same as setting "--egl-library-path=libEGL.(dll/dylib/so) 
+        --gles1-library-path=libGLESv1_CM.(dll/dylib/so)".
+
+    --egl-library-path=...
+    --gles1-library-path=...
+        Use the library at the provided locations for EGL or GLES, and also
+        sets the default GLES implementation to gles1_native. These correspond
+        to the SDL_EGL_LIBRARY and SDL_GL_LIBRARY hints respectively.
+
 Debugging options:
     --disable-direct-memory-access
         Force dynarmic to always access guest memory via the memory access

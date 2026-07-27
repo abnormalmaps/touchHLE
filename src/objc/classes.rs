@@ -459,10 +459,11 @@ fn substitute_classes(
     // don't support yet. This isn't "ad blocking" because ads no longer work
     // on real devices anyway :)
     if !(name.starts_with("AdMob")
+        || name.starts_with("AdWhirl")
         || name.starts_with("AltAds")
-        || name.starts_with("Mobclix")
         || name.starts_with("FB") // Facebook
         || name.starts_with("Flurry")
+        || name.starts_with("Mobclix")
         || name.starts_with("OpenFeint")
         || name.starts_with("Tapjoy"))
     {
@@ -1000,6 +1001,22 @@ impl ObjC {
         }
         let host_object = self.get_host_object(class).unwrap();
         matches!(host_object.as_any().downcast_ref(), Some(FakeClass { .. }))
+    }
+
+    #[allow(unused)]
+    pub fn get_non_metaclass(&mut self, mem: &mut Mem, class: Class) -> Class {
+        let ClassHostObject {
+            name, is_metaclass, ..
+        } = self.borrow(class);
+        if !is_metaclass {
+            return class;
+        }
+        if let Some(nonmeta) = self.metaclass_classes.get(&class) {
+            return *nonmeta;
+        }
+        let nonmeta = self.get_known_class(&name.clone(), mem);
+        self.metaclass_classes.insert(class, nonmeta);
+        nonmeta
     }
 }
 
